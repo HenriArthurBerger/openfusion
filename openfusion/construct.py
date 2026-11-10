@@ -70,7 +70,7 @@ def _put(ctx, fr, shape, label, design_frames, size):
                  kind="construction", role="reference", params=(("size", size),), history=(ctx.fid,)))
 
 
-def _plane(ctx, at=None, offset=0.0, angle=0.0, about="X", mid=None, points=None, size=None):
+def _plane(ctx, at=None, offset=0.0, angle=0.0, about="X", mid=None, points=None, size=None, tangent=None):
     """A construction plane. Its 'origin' anchor is the plane, Z its normal: use it as at= for
     a sketch or primitive, plane= for split and mirror, and so on.
       plane(at, offset=5)                    parallel to a face / anchor's XY plane, 5 mm along its normal
@@ -78,11 +78,17 @@ def _plane(ctx, at=None, offset=0.0, angle=0.0, about="X", mid=None, points=None
       plane(at, angle=30, about=edge)        through a straight edge, tilted from the face
       plane(mid=(face_a, face_b))            halfway between two faces or anchors
       plane(points=(p1, p2, p3))             through three points (normal: right-hand rule)
+      plane(tangent=shaft.face("side"))      touching a round face (cylinder, cone, sphere...) where it
+                                             is nearest `at` (default: the face's middle), turned
+                                             `angle` degrees round the face's axis; X along the axis
     size: the square drawn in the view (default: about the size of the part)."""
     from .ops import _is_line_ref, ref_line
-    if mid is not None and points is not None:
-        raise ValueError("give mid=(a, b) or points=(p1, p2, p3), not both")
-    if points is not None:
+    if sum(x is not None for x in (mid, points, tangent)) > 1:
+        raise ValueError("give one of mid=(a, b), points=(p1, p2, p3) or tangent=face")
+    if tangent is not None:
+        fr = _tangent_frame(ctx, tangent, at, angle)
+        refs = [tangent]
+    elif points is not None:
         if len(points) != 3:
             raise ValueError("points: give three points")
         ps = [np.asarray(_frame_of(ctx, p).origin, float) for p in points]
@@ -130,6 +136,41 @@ def _plane(ctx, at=None, offset=0.0, angle=0.0, about="X", mid=None, points=None
     if not size > 0:
         raise ValueError("size must be positive")
     _put(ctx, fr, _square(fr, size), "plane", {"center": Frame.world()}, size)
+
+
+def _tangent_frame(ctx, face_ref, at, angle):
+    """The plane touching a face where it is nearest a point (turned round its axis)."""
+    from OCP.BRep import BRep_Tool
+    from OCP.GeomAPI import GeomAPI_ProjectPointOnSurf
+    from OCP.gp import gp_Pnt
+    from .refs import FaceRef
+    if not isinstance(face_ref, FaceRef):
+        raise TypeError("tangent: give a face, e.g. shaft.face('side')")
+    body, faces = face_ref.resolve(ctx)
+    f = max(faces, key=lambda x: topo.face_area_centroid(x)[0])
+    if topo.surface_kind(f) == "plane":                 # a flat face: the plane it lies in
+        if angle:
+            raise ValueError("angle: a flat face has no axis to turn round")
+        p, n = topo.face_point_normal_mid(f)
+        return Frame.make(p, any_perpendicular(n), n)
+    ref = np.asarray(_frame_of(ctx, at).origin, float) if at is not None else topo.face_point_normal_mid(f)[0]
+    ax = topo.surface_axis(f)
+    if angle and ax is not None:
+        m = rotation_about(ax[0], ax[1], angle)
+        ref = (m @ np.append(ref, 1.0))[:3]
+    elif angle:
+        raise ValueError("angle: this face has no axis to turn round")
+    proj = GeomAPI_ProjectPointOnSurf(gp_Pnt(*map(float, ref)), BRep_Tool.Surface_s(f))
+    if proj.NbPoints() == 0:
+        raise ValueError("tangent: couldn't find the face near that point")
+    u, v = proj.LowerDistanceParameters()
+    p = topo.to_np(proj.NearestPoint())
+    n = topo.face_normal_at(f, u, v)
+    if ax is not None and abs(float(np.dot(n, ax[1]))) < 0.999:
+        x = unit(ax[1] - float(np.dot(ax[1], n)) * n)
+    else:
+        x = any_perpendicular(n)
+    return Frame.make(p, x, n)
 
 
 def _axis(ctx, ref=None, points=None, length=None):

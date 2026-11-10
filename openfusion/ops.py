@@ -651,6 +651,8 @@ def _extrude(ctx, face, distance, op="join", target=None, symmetric=False):
     (default: the body it was drawn on; with none, a new body); a negative distance pushes it
     into that body and cuts (engraves); the sketch itself means its 'profile' (the outline with
     its holes). symmetric=True goes distance/2 each way.
+    op='cut' goes into the body whichever way the face or sketch faces (the distance is how deep);
+    a sketch on no body (an origin plane) cuts every solid it reaches, unless target= says which.
     New faces: '<feature>.end' (cap), '<feature>.start', '<feature>.side(<edge or sketch curve>)'."""
     from .refs import Handle
     if op not in ("join", "cut", "new"):
@@ -676,50 +678,97 @@ def _extrude(ctx, face, distance, op="join", target=None, symmetric=False):
         tgt = target if target is not None else dict(b.params).get("owner")
         if op == "join" and distance < 0 and tgt is not None:
             op = "cut"                   # pushed into the body under it: engrave, like a face pushed in
-        if tgt is None and op != "new":
-            if op == "cut":
-                raise ValueError("extrude op='cut' from a sketch needs target=<body> (the sketch isn't on a body)")
-            op = "new"
+        if tgt is None and op == "join":
+            op = "new"                   # nothing to join to: a body of its own
     efmap = topo.edge_face_map(b.shape)
-    prisms = []
+
+    def make_prisms(d):
+        out = []
+        for f in faces:
+            if sheet:
+                n = np.asarray(b.frame.z, float)
+            else:
+                n = topo.plane_normal(f) if topo.surface_kind(f) == "plane" else None
+            if n is None:
+                raise ValueError("extrude currently needs a planar face")
+            base = f
+            if symmetric:
+                from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+                from OCP.gp import gp_Trsf
+                tr = gp_Trsf()
+                tr.SetTranslation(gp_Vec(*(-n * d / 2)))
+                base = BRepBuilderAPI_Transform(f, tr, True).Shape()
+            mk = BRepPrimAPI_MakePrism(base, gp_Vec(*(n * d)))
+            mk.Build()
+            p = mk.Shape()
+            nm = []
+            last, first = mk.LastShape(), mk.FirstShape()
+            for pf in topo.faces(p):
+                if pf.IsSame(last):
+                    nm.append((pf, FaceName(ctx.fid, "end")))
+                elif pf.IsSame(first):
+                    nm.append((pf, FaceName(ctx.fid, "start")))
+            src_edges = topo.edges(base)
+            for e0, e in zip(topo.edges(f), src_edges):
+                lbl = curve_of.get(e0) if sheet else b.edge_label(e0, efmap)
+                for g in mk.Generated(e):
+                    for pf in topo.faces(p):
+                        if pf.IsSame(g):
+                            nm.append((pf, FaceName(ctx.fid, f"side({lbl or 'edge'})")))
+            out.append((p, tuple(nm), f))
+        return out, n
+
+    def boolean_into(target, op_, prisms):
+        """The target with the prisms joined or cut, and how much volume changed."""
+        tools = [Body(id=f"{ctx.fid}#tool{i}", shape=p, frame=b.frame, face_names=nm, design=Design())
+                 for i, (p, nm, _) in enumerate(prisms)]
+        algo = _boolean(op_, target, tools, ctx.fid)
+        shape, nsol = _single_solid(algo.Shape())
+        if nsol == 0:
+            raise RuntimeError(f"extrude {op_} left no solid" if sheet else "extrude removed the whole body")
+        inputs = list(target.face_names) + [fn for t in tools for fn in t.face_names]
+        names = propagate_names(algo, inputs, shape, target.frame, target.id)
+        if nsol == 1:
+            shape, names = unify_faces(shape, names, target.frame, target.id)
+        return target.evolve(shape=shape, face_names=names, touched_by=ctx.fid), nsol, abs(topo.volume(shape) - topo.volume(target.shape))
+
+    def cut_either_way(targets):
+        """A cut goes into the part whichever way the face or sketch faces (like Fusion): the
+        distance as given, or the other way if that cuts nothing. [(new body, solids)] for the
+        bodies it changed."""
+        for sign in (1.0, -1.0):
+            prisms, _ = make_prisms(sign * float(distance))
+            done = []
+            for t in targets:
+                nb, nsol, dv = boolean_into(t, "cut", prisms)
+                if dv > 1e-9 * max(1.0, abs(topo.volume(t.shape))):
+                    done.append((nb, nsol))
+            if done:
+                if sign < 0:
+                    ctx.info["cut_direction"] = "flipped into the part"
+                return done
+        return []
+
     d = float(distance)
-    for f in faces:
-        if sheet:
-            n = np.asarray(b.frame.z, float)
-        else:
-            n = topo.plane_normal(f) if topo.surface_kind(f) == "plane" else None
-        if n is None:
-            raise ValueError("extrude currently needs a planar face")
-        base = f
-        if symmetric:
-            from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
-            from OCP.gp import gp_Trsf
-            tr = gp_Trsf()
-            tr.SetTranslation(gp_Vec(*(-n * d / 2)))
-            base = BRepBuilderAPI_Transform(f, tr, True).Shape()
-        mk = BRepPrimAPI_MakePrism(base, gp_Vec(*(n * d)))
-        mk.Build()
-        p = mk.Shape()
-        nm = []
-        last, first = mk.LastShape(), mk.FirstShape()
-        for pf in topo.faces(p):
-            if pf.IsSame(last):
-                nm.append((pf, FaceName(ctx.fid, "end")))
-            elif pf.IsSame(first):
-                nm.append((pf, FaceName(ctx.fid, "start")))
-        src_edges = topo.edges(base)
-        for e0, e in zip(topo.edges(f), src_edges):
-            lbl = curve_of.get(e0) if sheet else b.edge_label(e0, efmap)
-            for g in mk.Generated(e):
-                for pf in topo.faces(p):
-                    if pf.IsSame(g):
-                        nm.append((pf, FaceName(ctx.fid, f"side({lbl or 'edge'})")))
-        prisms.append((p, tuple(nm), f))
     if sheet:
-        if op == "new":
-            tgt_body = None
-        else:
-            tgt_body = ctx.body(tgt)
+        if op == "cut":
+            if tgt is not None:
+                targets = [ctx.body(tgt)]
+            else:
+                # a sketch on an origin plane (no body under it): cut every solid it reaches
+                from .export import FLAT_KINDS
+                targets = [x for x in ctx.state.values() if x.role == "solid" and x.kind not in FLAT_KINDS]
+            changed = 0
+            for nb, nsol in cut_either_way(targets):
+                if nsol > 1:
+                    ctx.warn(f"{nb.id}: result has {nsol} separate solids")
+                ctx.put(nb)
+                changed += 1
+            if not changed:
+                raise ValueError("the cut doesn't reach " + (f"'{targets[0].id}'" if tgt is not None else "any body")
+                                 + " either way: move the sketch, or give a longer distance")
+            return
+        prisms, n = make_prisms(d)
         fr0 = topo.face_area_centroid(faces[0])
         if op == "new":
             shape = prisms[0][0] if len(prisms) == 1 else _union_all([p for p, _, _ in prisms])
@@ -730,23 +779,15 @@ def _extrude(ctx, face, distance, op="join", target=None, symmetric=False):
             ctx.put(Body(id=ctx.fid, shape=shape, frame=start, face_names=tuple(names), design=design,
                          kind="extrude", history=(ctx.fid,)))
             return
-        tools = [Body(id=f"{ctx.fid}#tool{i}", shape=p, frame=b.frame, face_names=nm, design=Design())
-                 for i, (p, nm, _) in enumerate(prisms)]
-        algo = _boolean(op, tgt_body, tools, ctx.fid)
-        shape, nsol = _single_solid(algo.Shape())
-        if nsol == 0:
-            raise RuntimeError(f"extrude {op} left no solid")
+        nb, nsol, _ = boolean_into(ctx.body(tgt), op, prisms)
         if nsol > 1:
             ctx.warn(f"result has {nsol} separate solids")
-        inputs = list(tgt_body.face_names) + [fn for t in tools for fn in t.face_names]
-        names = propagate_names(algo, inputs, shape, tgt_body.frame, tgt_body.id)
-        if nsol == 1:
-            shape, names = unify_faces(shape, names, tgt_body.frame, tgt_body.id)
-        ctx.put(tgt_body.evolve(shape=shape, face_names=names, touched_by=ctx.fid))
+        ctx.put(nb)
         return
-    fr0 = topo.face_area_centroid(faces[0])
-    n0 = topo.plane_normal(faces[0])
     if op == "new":
+        prisms, n = make_prisms(d)
+        fr0 = topo.face_area_centroid(faces[0])
+        n0 = topo.plane_normal(faces[0])
         start = Frame.make(fr0[1], b.anchor("origin").x, n0)
         shape = prisms[0][0] if len(prisms) == 1 else topo.compound([p for p, _, _ in prisms])
         names = [x for _, nm, _ in prisms for x in nm]
@@ -756,18 +797,15 @@ def _extrude(ctx, face, distance, op="join", target=None, symmetric=False):
                   history=(ctx.fid,))
         ctx.put(nb)
         return
-    tools = [Body(id=f"{ctx.fid}#tool{i}", shape=p, frame=b.frame, face_names=nm, design=Design())
-             for i, (p, nm, _) in enumerate(prisms)]
-    eff = "cut" if (op == "cut" or distance < 0) else "join"
-    algo = _boolean(eff, b, tools, ctx.fid)
-    shape, nsol = _single_solid(algo.Shape())
-    if nsol == 0:
-        raise RuntimeError("extrude removed the whole body")
-    inputs = list(b.face_names) + [fn for t in tools for fn in t.face_names]
-    names = propagate_names(algo, inputs, shape, b.frame, b.id)
-    if nsol == 1:
-        shape, names = unify_faces(shape, names, b.frame, b.id)
-    ctx.put(b.evolve(shape=shape, face_names=names, touched_by=ctx.fid))
+    if op == "cut":
+        done = cut_either_way([b])
+        if not done:
+            raise ValueError("the cut removes nothing either way")
+        nb = done[0][0]
+    else:
+        prisms, _ = make_prisms(d)
+        nb, nsol, _ = boolean_into(b, "cut" if distance < 0 else "join", prisms)
+    ctx.put(nb)
 
 
 def _union_all(shapes):

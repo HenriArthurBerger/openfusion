@@ -20,6 +20,7 @@
       <button id="export-btn" aria-pressed="false">Export…</button>
       <button id="params-btn" aria-pressed="false"><span aria-hidden="true" class="fx">ƒx</span> Parameters</button>
       <button id="script-btn" aria-pressed="false" title="Show the script (Cmd+E)">Script</button>
+      <button id="settings-btn" title="Settings: how the mouse and trackpad orbit, pan and zoom" aria-label="Settings">⚙</button>
       <button id="help-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
     </div>
   </header>
@@ -60,6 +61,8 @@
     <div class="cube-wrap">
       <canvas id="viewcube" aria-label="View cube: click a face, edge or corner to look from there; drag to orbit"></canvas>
       <div class="cube-btns">
+        <button id="nav-pan" aria-pressed="false" title="Pan: left-drag moves the view (click again or Esc to select)" aria-label="Pan with the left button"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12M11 11V4a1.5 1.5 0 0 1 3 0v7M14 11V5.5a1.5 1.5 0 0 1 3 0V13M17 9.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-1.5a6 6 0 0 1-4.6-2.2L4.6 15.6a1.6 1.6 0 0 1 2.3-2.2L8 14.5"/></svg></button>
+        <button id="nav-orbit" aria-pressed="false" title="Orbit: left-drag turns the view (click again or Esc to select)" aria-label="Orbit with the left button"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><ellipse cx="12" cy="12" rx="9" ry="4"/><path d="M12 3a9 9 0 0 1 0 18" stroke-dasharray="2 2"/><path d="M18 6.5l2.6-.6-.3 2.7"/></svg></button>
         <button id="home-view" title="Home view (Option+0)" aria-label="Home view"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M4 11l8-7 8 7v9h-5v-6H9v6H4z"/></svg></button>
         <button id="fit-view" title="Fit all (Option+F)" aria-label="Fit all"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
       </div>
@@ -71,6 +74,7 @@
     <div class="tip" id="tip" hidden></div>
     <div class="selbox" id="selbox" hidden></div>
     <div class="toast" id="toast" hidden></div>
+    <div class="draft-chip" id="draft-chip" hidden role="status"></div>
     <div class="selinfo" id="selinfo" hidden aria-live="polite"></div>
     <div class="status"><code id="hover">Click a face or edge to select it; double-click selects the body.</code><span id="sel"></span><span class="perf" id="grid-step"></span><span class="perf" id="perf"></span></div>
   </main>
@@ -90,6 +94,7 @@
 <div class="help" id="help" hidden></div>
 <div class="pp" id="params-panel" hidden></div>
 <div class="pp" id="docs-panel" hidden></div>
+<div class="pp" id="settings-panel" hidden></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -16,7 +16,7 @@ from .ops import (box, chamfer, combine, cone, coil, copy, cut, extrude, fillet,
                   profile, revolve, loft, sweep, shell, draft, sketch, hole, thread, text, plane, axis, import_file, gear)
 from .refs import edge_between, world
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 # ---------------------------------------------------------------- units
 mm = 1.0

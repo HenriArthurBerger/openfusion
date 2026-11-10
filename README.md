@@ -34,33 +34,7 @@ from a Python that is too old: delete `.venv` and recreate it as above.
 
 No Node.js is needed: the app's frontend ships prebuilt in `openfusion/gui/static/`.
 
-
-## Building for Linux (Bash)
-
-```bash
-cd openfusion
-python3.13 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[test,app]"
-python -m pytest
-openfusion app
-```
-
-## Building for Windows (PowerShell)
-
-```bash
-cd openfusion
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[test,app]"
-python -m pytest
-openfusion app
-```
-
 ## Quick start
-
 
 ```bash
 openfusion new bracket.ofs           # starter script
@@ -84,12 +58,20 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
   without dragging opens the body menu. Two-finger scroll pans, Shift + two fingers orbits, pinch
   or the mouse wheel zooms at the pointer, middle-drag pans. Only one grid shows at a time: a face
   grid replaces the bed grid while you work on a face.
+- **Your own mouse.** On first start (and any time with **⚙** in the top bar) pick how you orbit, pan
+  and zoom: OpenFusion, **Fusion 360** (middle-drag pans, Shift + middle orbits), SolidWorks, Onshape,
+  Blender, or **My own**: any keys (Ctrl, Shift, Alt/Option, Cmd) with any button for each, e.g.
+  Ctrl + Shift + left-drag to orbit. Also: invert zoom, and whether two fingers on a trackpad pan or
+  orbit. The **✋** and **⟳** buttons under the view cube make a plain left drag pan or orbit (Esc or
+  the button again to go back to selecting).
 - **Sketch** (⌃⇧K, first button under CREATE). Click a flat face (or empty space for the bed); the
   view turns to face it. Draw with single keys: **L** line (clicks chain; nearly horizontal or
   vertical lines get that constraint), **R** rectangle, **C** circle, **A** arc (centre, start, end,
   counterclockwise), **⇧E** ellipse (centre, then a corner of the box around it), **O** point, **J** project (click edges of the model: fixed copies that follow it, their ends usable as points), **X** construction (dashed guides that bound no region). Clicking
   near an existing point reuses it. **S** selects (Shift adds); drag a point and the sketch follows,
-  keeping its constraints. Constrain the selection with the panel's buttons or keys (**H**
+  keeping its constraints. While drawing, the cursor also snaps to the **middle of a line** (a small
+  triangle; the new point stays at the midpoint) and **onto lines, arcs and circles** (a ring; the
+  point stays on the curve). Constrain the selection with the panel's buttons or keys (**H**
   horizontal, **V** vertical, **I** coincident / on a curve, **P** parallel, **⇧P** perpendicular,
   **T** tangent, **E** equal, **M** midpoint, **⇧C** concentric, **⇧Y** symmetric, **F** fix). **D**
   dimensions it: a line's length, a circle's diameter, an arc's radius, the distance between two
@@ -97,8 +79,13 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
   lines; type a number or a parameter (`P.width`). Double-click a dimension to change it. Every change
   is solved by the engine itself, so what you see is what builds; closed regions are shaded, the
   panel counts the degrees of freedom left ("Fully constrained" at 0), and constraints that can't
-  all be met are refused with the reason. ⌘Z undoes inside the sketch; **Finish sketch** writes one
-  `sketch(...)` statement; double-click it in the timeline to edit it again. Push/Pull, Revolve,
+  all be met are refused with the reason. A constraint button with nothing (or not enough)
+  selected **waits for you to click** what it needs, like Fusion: Tangent, then the line, then the
+  circle; it stays on for the next pair until Esc. ⌘Z undoes inside the sketch; **Finish sketch** writes one
+  `sketch(...)` statement; double-click it in the timeline to edit it again. **Leaving a sketch**
+  any other way (Esc, another tool, the timeline) keeps it too, as if you had pressed Finish; only
+  Cancel throws the changes away, and it asks first. A sketch that can't be written (its constraints
+  can't be met) is kept aside: *Reopen* it from the note over the timeline. Push/Pull, Revolve,
   Loft and Sweep take the sketch (its outline with holes) or one region of it; Sweep also takes its
   curves one by one as a path.
   - **Editing tools.** **⇧T Trim**: click the piece of a line, arc or circle to take out; it is cut
@@ -143,8 +130,13 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
   cut, ⇄ (or F) to show the other half. The cut faces are filled in orange. **Keep** leaves it on (the
   *Section ✕* chip at the top turns it off); it only changes the view, nothing is written to the script.
 - **Construct** group: Offset plane (also tilted), Plane through edge (at an angle), Midplane (click two
-  parallel faces) and Axis (an edge, or a hole's centre line). They are ghosts you can sketch on, split
+  parallel faces), **Tangent plane** (touching a shaft, hole, cone or ball where it's nearest a point,
+  or turned round its axis by an angle: `plane(tangent=shaft.face("side"), angle=30)`) and Axis (an
+  edge, or a hole's centre line). They are ghosts you can sketch on, split
   or mirror with, and revolve or pattern about.
+- **Push/Pull** (⌃E): Result *Cut* goes into the part whichever way the face or sketch faces, the
+  distance being the depth; a sketch on an origin plane cuts every body it reaches (or only the one
+  in *Into body*). *Both ways* extrudes half the distance each side.
 - **Profiles and forms.** Draw a cross-section on any face (Polyline ⌃⇧L: click points, click the
   first to close; Rectangle ⌃⇧B; Circle ⌃⇧C), then Revolve (⌃V), Loft (⌃L, through profiles or flat
   faces in order) or Sweep (⌃W, along an open profile or a chain of edges). Shell (⌃O) hollows a

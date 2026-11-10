@@ -526,3 +526,34 @@ def test_the_piece_by_piece_union_and_its_checks():
     assert u is not None and _gvol(u) == pytest.approx(1500)
     u2 = _fuse_one(u, far)                      # pieces that don't touch (yet) are fine too
     assert u2 is not None and _gvol(u2) == pytest.approx(1501) and len(topo.solids(u2)) == 2
+
+
+def test_extrude_cut_goes_into_the_part_whichever_way():
+    import numpy as np
+    src = ('plate = box(length=40, width=30, height=10, origin="center_xy")\n'
+           's = sketch(at=plate.face("+Z"), points={"o": (0, 0)}, curves={"c": ("circle", "o", 4)})\n')
+    # a sketch on the top face: Cut with a positive distance goes down into the plate
+    r = ok(src + 'c1 = extrude(s, 5, op="cut")\n')
+    assert vol(r, "plate") == pytest.approx(12000 - math.pi * 16 * 5, rel=1e-9)
+    assert r.results[-1].info.get("cut_direction")
+    # a face: the same
+    r = ok('plate = box(length=40, width=30, height=10)\nc = extrude(plate.face("-Z"), 2, op="cut")\n')
+    assert vol(r, "plate") == pytest.approx(40 * 30 * 8)
+    # a sketch on an origin plane cuts every body it reaches (not the ones it misses)
+    r = ok(src + 'other = box(length=5, width=5, height=50, at=world.point(10, 30, -20))\n'
+                 'far = box(length=5, width=5, height=5, at=world.point(100, 0, 0))\n'
+                 's2 = sketch(at=world.anchor("XZ"), points={"o": (12, 5)}, curves={"c": ("circle", "o", 1)})\n'
+                 'c2 = extrude(s2, 50, op="cut")\n')
+    # (its Z is -Y: the plate's near half; other is behind it, on +Y, out of reach)
+    assert vol(r, "plate") == pytest.approx(12000 - math.pi * 15, rel=1e-6)
+    assert vol(r, "other") == pytest.approx(5 * 5 * 50, rel=1e-6)
+    assert vol(r, "far") == pytest.approx(125)
+    # or only the one named
+    r = ok(src + 'other = box(length=5, width=5, height=50, at=world.point(10, 30, -20))\n'
+                 's2 = sketch(at=world.anchor("XZ"), points={"o": (12, 5)}, curves={"c": ("circle", "o", 1)})\n'
+                 'c2 = extrude(s2, 50, op="cut", target=other)\n')
+    assert vol(r, "plate") == pytest.approx(12000)
+    assert vol(r, "other") == pytest.approx(5 * 5 * 50 - math.pi * 5, rel=1e-6)          # flipped round to reach it
+    msg = err(src + 's3 = sketch(at=world.anchor("XY").offset(z=50), points={"o": (0, 0)}, curves={"c": ("circle", "o", 2)})\n'
+                    'c3 = extrude(s3, 3, op="cut")\n', "c3")
+    assert "doesn't reach any body" in msg

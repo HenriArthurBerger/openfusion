@@ -96,6 +96,9 @@ def page(tmp_path):
                 pytest.skip(f"no Chromium for Playwright: {e}")
             ctx = b.new_context(viewport={"width": 1440, "height": 900})
             ctx.add_init_script("Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'})")   # Mac keys
+            # the mouse settings are asked on first start: answered already (one test asks again)
+            ctx.add_init_script("try { if (!sessionStorage.getItem('fresh') && !localStorage.getItem('of-nav-v1')) "
+                                "localStorage.setItem('of-nav-v1', JSON.stringify({preset: 'openfusion'})) } catch (e) {}")
             pg = ctx.new_page()
             pg.set_default_timeout(30000)          # well inside the 90 s test limit, so a wait fails cleanly
             errors = []
@@ -920,4 +923,135 @@ def test_sketch_editing_tools_and_gear(page):
     r = Engine().run_file(str(f))
     assert r.ok, r.report()
     assert '"gear"' in f.read_text()
+    assert not errors, errors
+
+
+
+def test_mouse_settings_first_start_presets_and_the_hand_button(page):
+    pg, f, errors = page
+    pg.evaluate("() => { localStorage.removeItem('of-nav-v1'); sessionStorage.setItem('fresh', '1'); }")
+    pg.reload()
+    pg.wait_for_selector("#settings-panel:not([hidden]) [data-preset]")
+    assert "How do you like to move around" in pg.inner_text("#settings-panel")
+    pg.click('#settings-panel [data-preset="fusion"]')
+    pg.click("#settings-panel [data-done]")
+    assert pg.is_hidden("#settings-panel")
+    assert pg.evaluate("() => window.ofApp.vp.nav.orbit") == ["shift+middle"]
+    assert pg.evaluate("() => JSON.parse(localStorage.getItem('of-nav-v1')).preset") == "fusion"
+    box = pg.locator("#view").bounding_box()
+    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    cam = lambda: pg.evaluate("() => window.ofApp.vp.camera.position.toArray()")        # noqa: E731
+    tgt = lambda: pg.evaluate("() => window.ofApp.vp.controls.target.toArray()")       # noqa: E731
+
+    def drag(button, mods=()):
+        for m in mods:
+            pg.keyboard.down(m)
+        pg.mouse.move(cx, cy)
+        pg.mouse.down(button=button)
+        for k in range(1, 6):
+            pg.mouse.move(cx + 12 * k, cy + 6 * k)
+        pg.mouse.up(button=button)
+        for m in mods:
+            pg.keyboard.up(m)
+    c0, t0 = cam(), tgt()
+    drag("middle", ["Shift"])                                # Fusion: Shift + middle orbits
+    assert c0 != cam() and tgt() == pytest.approx(t0)
+    c1, t1 = cam(), tgt()
+    drag("middle")                                           # middle pans: the target moves too
+    assert tgt() != pytest.approx(t1)
+    c2 = cam()
+    drag("right")                                            # right drag does nothing in Fusion's mapping
+    assert cam() == pytest.approx(c2)
+    # my own: Ctrl + Shift + left orbits (and left alone still selects)
+    pg.click("#settings-btn")
+    pg.click('#settings-panel [data-preset="custom"]')
+    row = '#settings-panel tr[data-action="orbit"]'
+    pg.check(f'{row} [data-mod="ctrl"]')
+    pg.check(f'{row} [data-mod="shift"]')
+    pg.select_option(f"{row} [data-btn]", "left")
+    pg.click("#settings-panel [data-done]")
+    assert pg.evaluate("() => window.ofApp.vp.nav.orbit") == ["ctrl+shift+left"]
+    c3 = cam()
+    drag("left", ["Control", "Shift"])
+    assert cam() != pytest.approx(c3)
+    assert pg.evaluate("() => window.ofApp.selection.length") == 0 and pg.is_hidden("#selbox")
+    # the hand button: a plain left drag pans; Esc goes back to selecting
+    pg.click("#nav-pan")
+    t4 = tgt()
+    drag("left")
+    assert tgt() != pytest.approx(t4)
+    pg.keyboard.press("Escape")
+    assert pg.evaluate("() => window.ofApp.vp.navTool") is None
+    assert not errors, errors
+
+
+def test_sketch_constraint_tools_wait_for_picks_snaps_and_keeping_work(page):
+    pg, f, errors = page
+    pg.evaluate("""() => { const a = window.ofApp;
+        const hit = a.vp.faceMeshes.find(m => m.userData.body === 'plate' && m.userData.label === '+Z').userData;
+        a.selection = [{kind: 'face', body: 'plate', ref: hit.ref, label: '+Z', entry: hit.face, point: [0, 0, 10], key: 'face:' + hit.ref}];
+        a.openTool('sketch'); }""")
+    pg.wait_for_selector("#dialog.sk-panel #sk-ok")
+    pg.wait_for_function("window.ofApp.dialog.solved && !window.ofApp.vp.anim && !window.ofApp.dialog.busy")
+    box = pg.locator("#view").bounding_box()
+
+    def at(x, y):
+        sx, sy = pg.evaluate("([x, y]) => window.ofApp.dialog.screen([x, y])", [x, y])
+        return box["x"] + sx, box["y"] + sy
+
+    def click(x, y):
+        X, Y = at(x, y)
+        pg.mouse.move(X, Y)
+        pg.mouse.click(X, Y)
+
+    def settle():
+        pg.wait_for_timeout(60)
+        pg.wait_for_function("window.ofApp.dialog && window.ofApp.dialog.solved && !window.ofApp.dialog.busy")
+    model = lambda: pg.evaluate("() => window.ofApp.dialog.model")          # noqa: E731
+    # a line, then a second line starting at its midpoint: held there
+    pg.keyboard.press("l")
+    click(-10, -4)
+    click(10, -4)
+    pg.keyboard.press("Escape")
+    settle()
+    l1 = next(iter(model()["curves"]))
+    pg.keyboard.press("l")
+    pg.mouse.move(*at(0.3, -4.2))
+    tip = pg.inner_text("#tip")
+    assert "midpoint of " + l1 in tip, tip
+    click(0.3, -4.2)
+    click(0, 6)
+    pg.keyboard.press("Escape")
+    settle()
+    m = model()
+    assert any(c[0] == "midpoint" and c[2] == l1 for c in m["cons"]), m["cons"]
+    # a circle, then Tangent with nothing selected: it waits; click the line, then the circle
+    pg.keyboard.press("c")
+    click(0, 10)
+    pg.mouse.move(*at(0, 13))
+    pg.keyboard.type("6")
+    pg.keyboard.press("Enter")
+    settle()
+    circle = next(n for n, c in model()["curves"].items() if c[0] == "circle")
+    pg.keyboard.press("s")
+    pg.click('[data-rule="tangent"]')
+    assert pg.evaluate("() => window.ofApp.dialog.pendingRule") == "tangent"
+    a, b = pg.evaluate("(n) => window.ofApp.dialog.curveGeom(n)", l1)
+    click(-6, -4)                                            # on l1, away from its points
+    g = pg.evaluate("(n) => window.ofApp.dialog.curveGeom(n)", circle)
+    click(*g[16])                                            # on the circle
+    settle()
+    assert ["tangent", l1, circle] in model()["cons"] or ["tangent", circle, l1] in model()["cons"]
+    assert pg.evaluate("() => window.ofApp.dialog.pendingRule") == "tangent"   # waits for the next pair
+    pg.keyboard.press("Escape")
+    assert pg.evaluate("() => window.ofApp.dialog.pendingRule") is None
+    # Cancel asks before throwing work away
+    pg.click("#sk-cancel")
+    assert pg.inner_text("#sk-cancel") == "Discard changes?"
+    assert pg.is_visible("#dialog")
+    # leaving the sketch another way keeps it (here: opening another tool)
+    pg.evaluate("() => window.ofApp.openTool('box')")
+    pg.wait_for_function("window.ofApp.state.desc.features.some(f => f.op === 'sketch')")
+    text = f.read_text()
+    assert "sketch1 = sketch(" in text and '"midpoint"' in text and '"tangent"' in text
     assert not errors, errors

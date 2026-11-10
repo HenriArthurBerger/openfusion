@@ -11,6 +11,7 @@ import { ExportPanel, quickExport } from "./exporter.js";
 import { ParamsPanel } from "./params.js";
 import { AttributesPanel } from "./attrs.js";
 import { DocumentsPanel } from "./docs.js";
+import { SettingsPanel, apply as applyNav, load as loadNav } from "./settings.js";
 
 const IDLE_HINT = "Click a face or edge to select it; double-click selects the body. Drag a box to select (→ inside, ← touching). Right-drag orbits, two fingers pan, pinch or wheel zooms.";
 
@@ -29,8 +30,40 @@ class App {
       $("grid-step").textContent = local ? `Face grid ${fmtStep(this.vp.localStep)} · snaps to its lines`
         : `Grid ${fmtStep(this.vp.gridStep)} · snap ${fmtStep(this.vp.snapStep())}`;
     });
+    const nav = loadNav();
+    if (nav) applyNav(this, nav);
     this.refresh(true);
     setInterval(() => this.poll(), 600);
+  }
+
+  // mouse and trackpad (⚙ in the top bar; asked once on first start)
+  openSettings(first = false) {
+    this.closeMenus();
+    if (this.settings) this.settings.close();
+    this.settings = new SettingsPanel(this, first);
+  }
+
+  // a sketch that couldn't be written when you left it: a chip over the timeline brings it back
+  keepSketchDraft(draft, why) {
+    this.sketchDraft = draft;
+    const el = $("draft-chip");
+    el.innerHTML = `<span>Unsaved sketch${why ? ` (${esc(why)})` : ""}</span><button type="button" data-reopen>Reopen</button><button type="button" data-drop>Discard</button>`;
+    el.hidden = false;
+    el.querySelector("[data-reopen]").onclick = () => { el.hidden = true; const d = this.sketchDraft; this.sketchDraft = null; this.openTool("sketch", { draft: d }); };
+    el.querySelector("[data-drop]").onclick = () => { el.hidden = true; this.sketchDraft = null; };
+    toast("The sketch couldn't be saved; it's kept: Reopen it from the note above the timeline", true, 6000);
+  }
+
+  closeSettings() { if (this.settings) { this.settings.close(); this.settings = null; } }
+
+  // the ✋ and ⟳ buttons: a plain left drag pans or orbits (click again, or Esc, to go back to selecting)
+  setNavTool(t) {
+    this.vp.navTool = this.vp.navTool === t ? null : t;
+    $("nav-pan").setAttribute("aria-pressed", String(this.vp.navTool === "pan"));
+    $("nav-orbit").setAttribute("aria-pressed", String(this.vp.navTool === "orbit"));
+    $("view").classList.toggle("nav-pan", this.vp.navTool === "pan");
+    $("view").classList.toggle("nav-orbit", this.vp.navTool === "orbit");
+    this.setHint(this.vp.navTool ? `Drag to ${this.vp.navTool} the view. Esc or the button again to select` : IDLE_HINT);
   }
 
   // ------------------------------------------------------------------ server state
@@ -50,6 +83,7 @@ class App {
     document.body.classList.toggle("in-app", !!st.app);
     if (st.start) { this.state = st; this.showStart(st); return; }
     $("start").hidden = true;
+    if (!this.askedNav && !loadNav()) { this.askedNav = true; setTimeout(() => this.openSettings(true), 0); }   // once, on first start
     if (this.openFile !== st.file) {          // another document: start fresh
       if (this.openFile !== undefined) first = true;
       this.openFile = st.file;
@@ -317,7 +351,7 @@ class App {
     if (!this.state.desc.gui) { toast("Code-only mode: edit this feature in the script", true); this.toggleEditor(true); this.editor.showLines(f.line, f.end_line); return; }
     const tool = f.op === "move" && f.args.to ? "move_p2p"
       : f.op === "profile" ? (f.args.points ? "profile_line" : f.args.r ? "profile_circle" : "profile_rect")
-      : f.op === "plane" ? (f.args.points ? null : f.args.mid ? "midplane" : f.args.about && !/^["']?[XY]["']?$/.test(f.args.about) ? "plane_edge" : "plane")
+      : f.op === "plane" ? (f.args.points ? null : f.args.tangent ? "plane_tangent" : f.args.mid ? "midplane" : f.args.about && !/^["']?[XY]["']?$/.test(f.args.about) ? "plane_edge" : "plane")
       : f.op === "axis" && f.args.points ? null
       : OP_TO_TOOL[f.op];
     if (!tool) { this.toggleEditor(true); this.editor.showLines(f.line, f.end_line); return; }
@@ -884,6 +918,9 @@ class App {
     $("redo").addEventListener("click", () => this.redo());
     $("script-btn").addEventListener("click", () => this.toggleEditor());
     $("help-btn").addEventListener("click", () => this.toggleHelp());
+    $("settings-btn").addEventListener("click", (e) => { e.stopPropagation(); this.settings ? this.closeSettings() : this.openSettings(); });
+    $("nav-pan").addEventListener("click", () => this.setNavTool("pan"));
+    $("nav-orbit").addEventListener("click", () => this.setNavTool("orbit"));
     $("export-btn").addEventListener("click", (e) => { e.stopPropagation(); this.exporter ? this.closeExport() : this.openExport(); });
     $("file").addEventListener("click", (e) => { e.stopPropagation(); this.openDocs(); });
     $("params-btn").addEventListener("click", (e) => { e.stopPropagation(); this.paramsPanel ? this.closeParams() : this.openParams(); });
@@ -1001,6 +1038,8 @@ class App {
       if (this.dialog && !inCode && this.dialog.key(ev)) return;
       if (ev.key === "Escape") {
         if (!$("help").hidden) return this.toggleHelp(false);
+        if (this.settings) { this.closeSettings(); return; }
+        if (this.vp.navTool && !this.dialog) { this.setNavTool(this.vp.navTool); return; }
         if (this.docs) { this.closeDocs(); return; }
         if (this.paramsPanel) { this.closeParams(); return; }
         if (this.attrs && !this.dialog) { this.closeAttrs(); return; }

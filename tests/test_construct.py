@@ -78,7 +78,7 @@ def test_axes_from_edges_faces_anchors_and_points():
 
 
 def test_construction_errors():
-    assert "not both" in status(run('p = plane(mid=(block.face("-X"), block.face("+X")), points=(1, 2, 3))\n'), "p")[1]
+    assert "give one of" in status(run('p = plane(mid=(block.face("-X"), block.face("+X")), points=(1, 2, 3))\n'), "p")[1]
     assert "three points" in status(run('p = plane(points=(block.anchor("+++"),))\n'), "p")[1]
     assert "in a line" in status(run('p = plane(points=(block.anchor("---"), block.anchor("center"), block.anchor("+++")))\n'), "p")[1]
     assert "two faces" in status(run('p = plane(mid=(block.face("-X"),))\n'), "p")[1]
@@ -90,3 +90,34 @@ def test_construction_errors():
     assert "two points" in status(run('a = axis(points=(block.anchor("+++"),))\n'), "a")[1]
     assert "the same" in status(run('a = axis(points=(block.anchor("+++"), block.anchor("+++")))\n'), "a")[1]
     assert "length must be positive" in status(run('a = axis(block.anchor("+Z"), length=0)\n'), "a")[1]
+
+
+def test_tangent_planes_touch_round_faces():
+    import numpy as np
+    from openfusion import Engine, topo
+    r = Engine().run_source('''from openfusion import *
+shaft = cylinder(r=10, h=30)
+t1 = plane(tangent=shaft.face("side"))
+t2 = plane(tangent=shaft.face("side"), angle=90)
+t3 = plane(tangent=shaft.face("side"), at=world.point(0, 50, 15), offset=2)
+s = sketch(at=t3.anchor("origin"), points={"o": (0, 0)}, curves={"c": ("circle", "o", 2)})
+c = extrude(s, 5, op="cut", target=shaft)
+ball = sphere(r=5, at=world.point(50, 0, 0))
+t4 = plane(tangent=ball.face("surface"), at=world.point(60, 10, 0))
+box1 = box(length=5, width=5, height=5, at=world.point(0, -50, 0))
+t5 = plane(tangent=box1.face("+Z"))
+''')
+    assert all(x.status == "ok" for x in r.results), r.report()
+    o = lambda n: r.bodies[n].anchor("origin")                          # noqa: E731
+    t1 = o("t1")
+    assert np.hypot(*t1.origin[:2]) == __import__("pytest").approx(10) and abs(float(np.dot(t1.z, [0, 0, 1]))) < 1e-9
+    assert np.allclose(t1.x, [0, 0, 1])                                   # X along the axis
+    ang = lambda f: np.degrees(np.arctan2(f.origin[1], f.origin[0]))     # noqa: E731
+    assert (ang(o("t2")) - ang(t1)) % 360 == __import__("pytest").approx(90)
+    assert np.allclose(o("t3").origin, [0, 12, 15]) and np.allclose(o("t3").z, [0, 1, 0])
+    assert np.allclose(o("t4").z, [2 ** -0.5, 2 ** -0.5, 0])
+    assert np.allclose(o("t5").z, [0, 0, 1]) and o("t5").origin[2] == __import__("pytest").approx(5)
+    # the sketch on t3 (2 mm off the shaft) cut 3 mm into it
+    assert topo.volume(r.bodies["shaft"].shape) < np.pi * 100 * 30 - 30
+    bad = Engine().run_source('from openfusion import *\nb = box(length=5, width=5, height=5)\np = plane(tangent=b.face("+Z"), angle=10)\n')
+    assert "no axis" in bad.results[-1].message

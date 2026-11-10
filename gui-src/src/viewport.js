@@ -27,8 +27,14 @@ export class Viewport {
     // Fusion-style mouse: left drag is the selection box (main.js), right drag orbits, middle drag pans.
     // The wheel is ours (bindWheel): two-finger trackpad scroll pans, pinch and the mouse wheel zoom
     // at the cursor, Shift + two-finger scroll orbits.
-    this.controls.mouseButtons = { LEFT: -1, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
-    this.controls.enableZoom = false;
+    // Mouse navigation is ours (bindNav), so any button with any modifiers can orbit, pan or zoom
+    // (presets for Fusion, SolidWorks, Onshape, Blender, or your own); the orbit controls only keep
+    // the camera's target.
+    this.controls.mouseButtons = { LEFT: -1, MIDDLE: -1, RIGHT: -1 };
+    this.controls.enableZoom = false; this.controls.enableRotate = false; this.controls.enablePan = false;
+    this.nav = { orbit: ["right"], pan: ["middle"], zoom: [], invertZoom: false, trackpad: "pan" };
+    this.navTool = null;              // the hand (pan) or orbit button: a plain left drag does that
+    this.bindNav();
     this.bindWheel();
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f96, 2.0));
     const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(0.4, -0.6, 1); this.camera.add(key);
@@ -460,6 +466,56 @@ export class Viewport {
     if (k >= 1) this.anim = null;
   }
 
+  // ---------------------------------------------------------------- mouse navigation
+  // A binding is "button" or "mods+button": "right", "shift+middle", "ctrl+shift+left".
+  static bindingOf(ev) {
+    const b = ["left", "middle", "right"][ev.button];
+    if (!b) return null;
+    const mods = [ev.ctrlKey && "ctrl", ev.shiftKey && "shift", ev.altKey && "alt", ev.metaKey && "meta"].filter(Boolean);
+    return [...mods, b].join("+");
+  }
+
+  // the navigation a pointer-down starts, if any: "orbit" | "pan" | "zoom"
+  navFor(ev) {
+    const b = Viewport.bindingOf(ev);
+    if (!b) return null;
+    if (b === "left" && this.navTool) return this.navTool;
+    for (const action of ["orbit", "pan", "zoom"]) if ((this.nav[action] || []).includes(b)) return action;
+    return null;
+  }
+
+  bindNav() {
+    const c = this.canvas;
+    c.addEventListener("pointerdown", (ev) => {
+      const action = this.navFor(ev);
+      if (!action) return;
+      this._nav = { action, x: ev.clientX, y: ev.clientY, x0: ev.clientX, y0: ev.clientY, moved: false, at: { clientX: ev.clientX, clientY: ev.clientY } };
+      if (ev.button === 0) {           // a left drag that navigates: no selection box, no picking, no point drag
+        ev.preventDefault(); ev.stopImmediatePropagation();
+        c.setPointerCapture(ev.pointerId);
+      }
+    }, true);
+    window.addEventListener("pointermove", (ev) => {
+      const n = this._nav;
+      if (!n) return;
+      if (!n.moved && Math.hypot(ev.clientX - n.x0, ev.clientY - n.y0) < 3) return;
+      n.moved = true; this.navDragging = true;
+      const dx = ev.clientX - n.x, dy = ev.clientY - n.y;
+      n.x = ev.clientX; n.y = ev.clientY;
+      if (this.anim) return;
+      if (n.action === "orbit") this.orbitBy(-dx * 0.008, -dy * 0.008);
+      else if (n.action === "pan") this.panBy(-dx, -dy);
+      else this.zoomAt(n.at, Math.exp((this.nav.invertZoom ? -dy : dy) * 0.01));
+    }, true);
+    window.addEventListener("pointerup", () => {
+      if (!this._nav) return;
+      this._nav = null;
+      setTimeout(() => { this.navDragging = false; }, 0);
+    }, true);
+  }
+
+  setNav(nav) { this.nav = { ...this.nav, ...nav }; }
+
   // ---------------------------------------------------------------- wheel: pan, zoom, orbit
   bindWheel() {
     this._wheel = { kind: null, t: 0 };
@@ -468,8 +524,11 @@ export class Viewport {
       if (this.anim) return;
       if (ev.ctrlKey) return this.zoomAt(ev, Math.exp(ev.deltaY * 0.012));          // pinch (and Ctrl + wheel)
       const kind = this.wheelKind(ev);
-      if (kind === "mouse") return this.zoomAt(ev, Math.exp(Math.sign(ev.deltaY) * Math.min(Math.abs(ev.deltaY), 240) * 0.0018));
-      if (ev.shiftKey) return this.orbitBy(-ev.deltaX * 0.006, -ev.deltaY * 0.006);
+      const inv = this.nav.invertZoom ? -1 : 1;
+      if (kind === "mouse") return this.zoomAt(ev, Math.exp(inv * Math.sign(ev.deltaY) * Math.min(Math.abs(ev.deltaY), 240) * 0.0018));
+      // two fingers: pan (or orbit, by choice); with Shift the other one
+      const orbit = (this.nav.trackpad === "orbit") !== ev.shiftKey;
+      if (orbit) return this.orbitBy(-ev.deltaX * 0.006, -ev.deltaY * 0.006);
       this.panBy(ev.deltaX, ev.deltaY);
     }, { passive: false });
   }

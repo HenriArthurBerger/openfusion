@@ -72,11 +72,11 @@ def test_extrude_a_region_cut_and_symmetric():
     lo, hi = topo.bbox(e.shape)
     assert lo[2] == pytest.approx(2) and hi[2] == pytest.approx(8)             # 3 below and above the top (z=5)
     assert {"side(top)", "side(hole)", "start", "end"} <= set(e.face_labels())
-    # off any body, join becomes a new body; cut needs a target
+    # off any body, join becomes a new body; a cut that reaches no body says so
     r, _ = ok('s = sketch(points={"o": (0, 0)}, curves={"c": ("circle", "o", 5)})\ne = extrude(s, 4)\n', "e")
     assert topo.volume(r.bodies["e"].shape) == pytest.approx(math.pi * 25 * 4, rel=1e-6)
     r, res = result('s = sketch(points={"o": (0, 0)}, curves={"c": ("circle", "o", 5)})\ne = extrude(s, 4, op="cut")\n', "e")
-    assert res.status == "error" and "target" in res.message
+    assert res.status == "error" and "doesn't reach any body" in res.message
 
 
 def test_slot_from_tangent_arcs():

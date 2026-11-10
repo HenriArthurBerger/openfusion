@@ -84,8 +84,15 @@ export class Sketcher {
     this.down = (ev) => this.pointerDown(ev); this.up = (ev) => this.pointerUp(ev);
     this.vp.canvas.addEventListener("pointerdown", this.down, true);
     window.addEventListener("pointerup", this.up, true);
+    this.doc = app.openFile;
+    this.initial = JSON.stringify(this.model);
     this.renderPanel();
     this.start(opts);
+  }
+
+  // anything drawn or changed since the sketch was opened (it is kept when you leave without Finish)
+  dirty() {
+    return this.stage !== "plane" && JSON.stringify(this.model) !== this.initial && Object.keys(this.model.curves).length > 0;
   }
 
   // ------------------------------------------------------------------ the dialog interface the app uses
@@ -95,6 +102,16 @@ export class Sketcher {
   takeGroup() { return false; }
 
   async start(opts) {
+    if (opts.draft) {                 // a sketch left unsaved: back as it was
+      const d = opts.draft;
+      this.model = JSON.parse(d.model); this.at = d.at; this.spin = d.spin; this.edit = d.edit || null;
+      this.initial = d.initial;
+      this.renderPanel();
+      await this.solve();
+      if (this.info) this.enterPlane(this.info.frame);
+      this.setTool("select");
+      return;
+    }
     if (this.edit) {
       try {
         const src = await post("/api/sketch_source", { name: this.edit });
@@ -105,6 +122,7 @@ export class Sketcher {
       } catch (e) { toast(e.message, true); this.app.closeDialog(); return; }
       // the model as it is at this sketch, like Fusion: later steps don't get in the way
       post("/api/scene_at", { name: this.edit }).then((r) => { if (this.app.dialog === this) this.vp.setScene(r.scene); }).catch(() => {});
+      this.initial = JSON.stringify(this.model);
       await this.solve();
       if (this.info) this.enterPlane(this.info.frame);
       this.setTool("select");
@@ -164,8 +182,59 @@ export class Sketcher {
     if (best) return { name: best, p: this.pos(best).slice() };
     const p = this.local(ev);
     if (!p) return null;
+    // the middle of a line (a new point there is held at the midpoint), then any line, arc or
+    // circle (a new point there stays on it), as Fusion does while drawing
+    if (this.tool !== "select" && this.tool !== "dim" && this.tool !== "trim" && this.tool !== "fillet") {
+      let mid = null, md = PICK_PT;
+      for (const [n, c] of Object.entries(this.model.curves)) {
+        if (c[0] !== "line") continue;
+        const g = this.curveGeom(n);
+        if (!g) continue;
+        const m = [(g[0][0] + g[1][0]) / 2, (g[0][1] + g[1][1]) / 2];
+        const [sx, sy] = this.screen(m);
+        const d = Math.hypot(sx - mx, sy - my);
+        if (d < md) { md = d; mid = { name: null, p: m, mid: n }; }
+      }
+      if (mid) return mid;
+      let on = null, od = PICK_CURVE;
+      for (const [n, c] of Object.entries(this.model.curves)) {
+        if (!["line", "circle", "arc"].includes(c[0])) continue;
+        const q = this.nearestOn(n, p);
+        if (!q) continue;
+        const [sx, sy] = this.screen(q);
+        const d = Math.hypot(sx - mx, sy - my);
+        if (d < od) { od = d; on = { name: null, p: q, on: n }; }
+      }
+      if (on) return on;
+    }
     const st = this.vp.snapStep();
     return { name: null, p: [Math.round(p[0] / st) * st, Math.round(p[1] / st) * st] };
+  }
+
+  // the point of a line, arc or circle nearest p (null off an arc's ends or a line's)
+  nearestOn(n, p) {
+    const c = this.model.curves[n], info = (this.solved && this.solved.curves[n]) || {};
+    if (c[0] === "line") {
+      const g = this.curveGeom(n);
+      if (!g) return null;
+      const [a, b] = g, dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+      if (!L) return null;
+      const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L;
+      return t < 0.02 || t > 0.98 ? null : [a[0] + t * dx, a[1] + t * dy];
+    }
+    const ctr = info.centre || this.pos(c[1]);
+    const r = c[0] === "circle" ? (info.radius || Number(c[2]) || 0) : Math.hypot(this.pos(c[2])[0] - ctr[0], this.pos(c[2])[1] - ctr[1]);
+    const d = Math.hypot(p[0] - ctr[0], p[1] - ctr[1]);
+    if (!d || !r) return null;
+    const q = [ctr[0] + (p[0] - ctr[0]) * r / d, ctr[1] + (p[1] - ctr[1]) * r / d];
+    if (c[0] === "arc") {
+      const s0 = this.pos(c[2]), e0 = this.pos(c[3]);
+      const a0 = Math.atan2(s0[1] - ctr[1], s0[0] - ctr[0]), a1 = Math.atan2(e0[1] - ctr[1], e0[0] - ctr[0]);
+      const span = ((a1 - a0) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+      const at = ((Math.atan2(q[1] - ctr[1], q[0] - ctr[0]) - a0) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+      if (at > span) return null;
+    }
+    return q;
   }
   allPoints() { return { ...this.model.points, ...((this.solved && this.solved.points) || {}) }; }
 
@@ -248,7 +317,8 @@ export class Sketcher {
     else this.hoverKey = this.tool === "select" || this.tool === "dim" ? this.pickAt(ev) : null;
     this.updateHud();
     const p = this.cursor && this.cursor.p;
-    this.app.showTip(p ? `(${fmt(p[0])}, ${fmt(p[1])})${this.cursor.name ? " · " + this.cursor.name : ""}` : null, ev);
+    const snapTxt = this.cursor && (this.cursor.name ? " · " + this.cursor.name : this.cursor.mid ? ` · midpoint of ${this.cursor.mid}` : this.cursor.on ? ` · on ${this.cursor.on}` : "");
+    this.app.showTip(p ? `(${fmt(p[0])}, ${fmt(p[1])})${snapTxt || ""}` : null, ev);
     this.render();
     return true;
   }
@@ -309,10 +379,11 @@ export class Sketcher {
     const s = this.snapped(ev);
     if (this.tool === "select" || this.tool === "dim") {
       const k = this.pickAt(ev);
-      if (!k) { if (!ev.shiftKey) this.sel = []; }
-      else if (ev.shiftKey || ev.metaKey || this.tool === "dim") this.sel = this.sel.includes(k) ? this.sel.filter((x) => x !== k) : [...this.sel, k];
+      if (!k) { if (!ev.shiftKey && !this.pendingRule) this.sel = []; }
+      else if (ev.shiftKey || ev.metaKey || this.tool === "dim" || this.pendingRule) this.sel = this.sel.includes(k) ? this.sel.filter((x) => x !== k) : [...this.sel, k];
       else this.sel = [k];
       this.render(); this.refreshSide();
+      if (this.pendingRule && k) this.tryPendingRule();
       if (this.tool === "dim" && this.sel.length) this.tryDimension(false);
       return;
     }
@@ -352,10 +423,13 @@ export class Sketcher {
   }
 
   // ------------------------------------------------------------------ drawing
-  pointFor(s) {                  // reuse a snapped point, or add one
+  pointFor(s) {                  // reuse a snapped point, or add one (held where it snapped)
     if (s.name) return s.name;
     const n = this.newName("p", this.model.points);
     this.model.points[n] = s.p.slice();
+    if (s.mid) this.model.cons.push(["midpoint", n, s.mid]);
+    else if (s.on) this.model.cons.push(["on", n, s.on]);
+    s.name = n;                  // the same click used again (a chain of lines) reuses it
     return n;
   }
   addCurve(prefix, def) {
@@ -587,7 +661,31 @@ export class Sketcher {
     return { pts, crv, lines, rounds, kind };
   }
 
+  // A constraint button with what it needs selected adds it at once; without, it waits: click the
+  // items one by one (no Shift needed) and it is added as soon as they're there, then waits for
+  // the next ones, like Fusion's constraint tools. Esc stops.
   apply(rule) {
+    const add = this.constraintsFor(rule);
+    if (!add.length) {
+      const r = RULES.find((x) => x.id === rule);
+      if (this.tool !== "select") this.setTool("select");
+      this.pendingRule = rule;
+      this.sel = this.sel.filter(Boolean);
+      const msg = `${r.label}: click ${r.help} (Esc stops)`;
+      this.setStatus(msg); this.app.setHint(msg);
+      this.renderPanel(); this.render();
+      return;
+    }
+    this.addConstraints(add);
+  }
+
+  // after each click in a waiting constraint tool
+  tryPendingRule() {
+    const add = this.constraintsFor(this.pendingRule);
+    if (add.length) this.addConstraints(add);
+  }
+
+  constraintsFor(rule) {
     const { pts, crv, lines, rounds } = this.selected();
     const add = [];
     if (rule === "horizontal" || rule === "vertical") {
@@ -603,17 +701,20 @@ export class Sketcher {
     else if (rule === "midpoint" && pts.length === 1 && lines.length === 1) add.push(["midpoint", pts[0], lines[0]]);
     else if (rule === "symmetric" && pts.length === 2 && lines.length === 1) add.push(["symmetric", pts[0], pts[1], lines[0]]);
     else if (rule === "fix") for (const n of [...pts, ...crv]) add.push(["fix", n]);
-    if (!add.length) { toast(`${RULES.find((r) => r.id === rule).label}: select ${RULES.find((r) => r.id === rule).help}`, true); return; }
-    this.addConstraints(add);
+    return add;
   }
 
   async addConstraints(add) {
     this.remember();
     this.model.cons.push(...add);
     const ok = await this.solve();
-    if (!ok) { this.undo(true); return; }
     this.sel = [];
-    this.render();
+    if (!ok) { this.undo(true); this.render(); return; }
+    this.render(); this.refreshSide();
+    if (this.pendingRule) {
+      const r = RULES.find((x) => x.id === this.pendingRule);
+      this.setStatus(`${r.label} added. Click the next ones, or Esc to stop`, "ok");
+    }
   }
 
   // what a dimension on the selection would be, with its current value
@@ -867,13 +968,28 @@ export class Sketcher {
     try {
       this.adoptSolved();
       const r = await post("/api/apply", { op: "sketch", args: this.args(), edit: this.edit });
+      this.finished = true;
       this.app.closeDialog(true);
       await this.app.refresh();
       toast(`${this.edit ? "Updated" : "Added"} ${r.name}`);
     } catch (e) { this.setStatus(e.message, "error"); toast(e.message, true); }
   }
 
+  // Leaving a sketch by any other way than Cancel keeps it, like Fusion: it is written as if you
+  // pressed Finish. If it can't be written (it doesn't solve), it is kept aside to reopen.
+  autosave() {
+    const draft = { model: JSON.stringify(this.model), at: this.at, spin: this.spin, edit: this.edit, initial: this.initial };
+    if (this.app.openFile !== this.doc) return;           // another part was opened: nowhere to write it
+    let args;
+    try { this.adoptSolved(); args = this.args(); } catch (e) { this.app.keepSketchDraft(draft, e.message); return; }
+    const app = this.app;
+    post("/api/apply", { op: "sketch", args, edit: this.edit })
+      .then((r) => { app.refresh(); toast(`Sketch kept: ${this.edit ? "updated" : "added"} ${r.name} (⌘Z undoes it)`); })
+      .catch((e) => app.keepSketchDraft(draft, e.message));
+  }
+
   close() {
+    if (!this.finished && !this.discarding && this.dirty()) this.autosave();
     this.closeAsk(); this.hideHud();
     this.vp.temp.remove(this.group);
     this.labels.remove();
@@ -894,6 +1010,7 @@ export class Sketcher {
     if (ev.key === "Escape") {
       if (this.ask) { this.closeAsk(); return true; }
       if (this.picking) { this.picking = null; this.app.setHint(""); this.render(); return true; }
+      if (this.pendingRule) { this.pendingRule = null; this.sel = []; this.setStatus(""); this.app.setHint(""); this.renderPanel(); this.render(); return true; }
       if (this.pending.length) { this.pending = []; this.hideHud(); this.render(); return true; }
       if (this.sel.length) { this.sel = []; this.render(); this.refreshSide(); return true; }
       if (this.tool !== "select") { this.setTool("select"); return true; }
@@ -929,7 +1046,7 @@ export class Sketcher {
 
   setTool(id) {
     if (this.tool === "project" && id !== "project") this.vp.setHover(null);
-    this.tool = id; this.pending = []; this.hideHud(); this.picking = null;
+    this.tool = id; this.pending = []; this.hideHud(); this.picking = null; this.pendingRule = null;
     if (id !== "select" && id !== "dim") this.sel = [];
     this.labels.classList.toggle("drawing", id !== "select" && id !== "dim");    // labels don't catch drawing clicks
     this.renderPanel(); this.render();
@@ -954,7 +1071,7 @@ export class Sketcher {
       <div class="sk-tools" role="toolbar" aria-label="Edit">${EDITS.map((t) =>
         `<button type="button" data-edit="${t.id}" title="${esc(t.help)}">${esc(t.label)} ${kb(t.key)}</button>`).join("")}</div>
       <div class="sk-tools" role="toolbar" aria-label="Constrain">${RULES.map((r) =>
-        `<button type="button" data-rule="${r.id}" title="${esc(r.label + ": " + r.help)}">${r.glyph} ${esc(r.label)} ${kb(r.key)}</button>`).join("")}</div>
+        `<button type="button" data-rule="${r.id}" aria-pressed="${this.pendingRule === r.id}" title="${esc(r.label + ": " + r.help)}">${r.glyph} ${esc(r.label)} ${kb(r.key)}</button>`).join("")}</div>
       <div class="sk-status"></div>
       <div class="sk-side"></div>
       <div class="dlg-foot"><span class="sk-keys">${kb("⌘/Ctrl Z")} undo · ${kb("Del")} delete · ${kb("Esc")} step back</span>
@@ -966,7 +1083,16 @@ export class Sketcher {
     this.panel.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => this.runEdit(b.dataset.edit)));
     this.panel.querySelectorAll("[data-rule]").forEach((b) => b.addEventListener("click", () => this.apply(b.dataset.rule)));
     this.panel.querySelector("#sk-ok").addEventListener("click", () => this.ok());
-    this.panel.querySelector("#sk-cancel").addEventListener("click", () => this.app.closeDialog());
+    this.panel.querySelector("#sk-cancel").addEventListener("click", (e) => {
+      if (this.dirty() && !this.confirmDiscard) {       // a second click throws the changes away
+        this.confirmDiscard = true;
+        e.target.textContent = "Discard changes?"; e.target.classList.add("danger");
+        setTimeout(() => { this.confirmDiscard = false; if (e.target.isConnected) { e.target.textContent = "Cancel"; e.target.classList.remove("danger"); } }, 4000);
+        return;
+      }
+      this.discarding = true;
+      this.app.closeDialog();
+    });
     if (this.status) this.setStatus(...this.status);
     this.refreshSide();
   }
@@ -1209,6 +1335,13 @@ export class Sketcher {
       const color = selSet.has(key) ? "--sel" : this.hoverKey === key ? "--accent" : fixed ? "--ref" : "--ink";
       const m = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 6), new THREE.MeshBasicMaterial({ color: col(color), depthTest: false }));
       m.position.set(...this.w(this.pos(n))); m.userData.px = selSet.has(key) || this.hoverKey === key ? 4 : 2.6; m.renderOrder = 15; g.add(m);
+    }
+    // where the cursor snaps: a midpoint (a triangle) or onto a curve (a ring)
+    if (this.cursor && (this.cursor.mid || this.cursor.on)) {
+      const q = this.cursor.p, k = this.vp.worldPerPx() * 6;
+      const pts = this.cursor.mid ? [[q[0], q[1] + k], [q[0] - k * 0.9, q[1] - k * 0.6], [q[0] + k * 0.9, q[1] - k * 0.6], [q[0], q[1] + k]]
+        : Array.from({ length: 17 }, (_, i) => [q[0] + k * 0.7 * Math.cos(i / 16 * 2 * Math.PI), q[1] + k * 0.7 * Math.sin(i / 16 * 2 * Math.PI)]);
+      addLine(pts, "--sel");
     }
     // the rubber band for the tool in progress
     const cur = this.cursor && this.cursor.p && (this.pending.length ? this.hudTarget(this.cursor.p) : this.cursor.p);
