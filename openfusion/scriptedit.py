@@ -18,6 +18,7 @@ existing features are edited as code.
 from __future__ import annotations
 
 import ast
+import json
 import keyword
 import inspect
 import re
@@ -240,6 +241,8 @@ NEW_BODY = {"box", "cylinder", "cone", "sphere", "torus", "coil", "polygon", "co
 def default_base(op: str, args: dict | None = None) -> str:
     if op in NEW_BODY:
         return "body"
+    if op == "move" and str((args or {}).get("copy", "")).strip() == "True":
+        return "copy"                    # a moved copy is a body of its own
     if op in ("revolve", "loft", "sweep"):
         mode = str((args or {}).get("op", '"new"')).strip().strip("'\"")
         return "body" if mode == "new" else op
@@ -787,7 +790,61 @@ def describe(text: str) -> dict:
     for n, st in zip(names, sc.features()):
         feats.append({"name": n, "op": st.op, "line": st.line, "end_line": st.end_line,
                       "assigned": st.name is not None and not st.shadowed, "variable": st.name,
-                      "args": {a.key: a.text for a in st.args}, "creates": st.op in CREATES})
+                      "args": {a.key: a.text for a in st.args},
+                      "creates": st.op in CREATES or (st.op == "move" and any(a.key == "copy" and a.text.strip() == "True" for a in st.args))})
     return {"ok": True, "gui": sc.gui_ok, "blockers": sc.blockers(), "features": feats,
             "shadowed": shadowed_steps(text),
             "params": param_values(text), "param_info": param_info(text)}
+
+
+_POINT_REF = re.compile(r"""(?P<expr>[A-Za-z_]\w*(?:\[\d+\])?)\s*\.face\(\s*(?P<lab>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*\)"""
+                        r"""\s*\.(?P<kind>corner|mid|arc|hole|boss|inner)\(\s*(?P<i>\d+)\s*\)""")
+_POINT_REPR = re.compile(r"""^(?P<bid>.*?)\.face\((?P<lab>"(?:[^"\\]|\\.)*")\)\.(?P<kind>\w+)\((?P<i>\d+)\)$""")
+_NAMED_REPR = re.compile(r"""\.(?P<kind>\w+)\((?P<name>"(?:[^"\\]|\\.)*")\)$""")
+
+
+def _expr_body(expr: str) -> str:
+    m = re.match(r"^(\w+)\[(\d+)\]$", expr)
+    if m:
+        return m.group(1) if m.group(2) == "0" else f"{m.group(1)}_{m.group(2)}"
+    return expr
+
+
+def name_points(text: str, by_feature: dict) -> tuple[str, int]:
+    """Turn numbered face points (face("+Z").arc(0)) into named ones (arc("fillet1(+X+Y)")),
+    step by step. by_feature: step name -> {numbered ref: named ref}, as the engine reports
+    what each numbered point it resolved is called. Returns (new text, how many changed)."""
+    sc = Script(text)
+    if sc.error:
+        raise EditError(sc.error)
+    names = auto_names(sc)
+    edits = []
+    for st, nm in zip(sc.features(), names):
+        table = by_feature.get(nm)
+        if not table:
+            continue
+        cands = []
+        for old, new in table.items():
+            mo, mn = _POINT_REPR.match(old), _NAMED_REPR.search(new)
+            if not mo or not mn:
+                continue
+            cands.append((mo.group("bid"), json.loads(mo.group("lab")), mo.group("kind"), int(mo.group("i")), mn.group("name")))
+        seg = text[st.start:st.end]
+        for m in _POINT_REF.finditer(seg):
+            try:
+                lab = ast.literal_eval(m.group("lab"))
+            except (ValueError, SyntaxError):
+                continue
+            kind, i = m.group("kind"), int(m.group("i"))
+            hits = [c for c in cands if c[1] == lab and c[2] == kind and c[3] == i]
+            if len({c[4] for c in hits}) > 1:
+                hits = [c for c in hits if c[0] == _expr_body(m.group("expr"))]
+            if not hits or len({c[4] for c in hits}) != 1:
+                continue
+            # only the "(0)" after the kind changes; the body expression stays as written
+            a = st.start + m.start("i")
+            b = st.start + m.end("i")
+            edits.append((a, b, hits[0][4]))
+    for a, b, new in sorted(edits, reverse=True):
+        text = text[:a] + new + text[b:]
+    return text, len(edits)

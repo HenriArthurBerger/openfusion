@@ -160,9 +160,9 @@ def test_snaps_carry_script_references(sess):
     plate = next(b for b in sess.scene["bodies"] if b["id"] == "plate")
     top = next(f for f in plate["faces"] if f["label"] == "+Z")
     refs = [s["ref"] for s in top["snaps"]]
-    assert refs[0] == 'plate.anchor("+Z")' and 'plate.face("+Z").hole(0)' in refs
+    assert refs[0] == 'plate.anchor("+Z")' and 'plate.face("+Z").hole("body1.side")' in refs
     wall = next(f for f in plate["faces"] if f["label"] == "body1.side")
-    assert wall["snaps"][0]["ref"] == 'plate.face("+Z").hole(0)'   # pointing into the hole offers its center
+    assert wall["snaps"][0]["ref"] == 'plate.face("+Z").hole("body1.side")'   # pointing into the hole offers its center
     assert wall["snaps"][0]["z"] == [0.0, 0.0, 1.0]
 
 

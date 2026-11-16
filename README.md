@@ -163,7 +163,7 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
   Over the view, Tab cycles snap points.
 - **Points anywhere.** When a tool wants a point, click anywhere on a face: the point is kept as an
   offset from the face's feature nearest the cursor (a corner, the centre, a hole...), e.g.
-  `plate.face("+Z").corner(2).offset(x=5, y=-3)`, and the face's grid moves to start at that
+  `plate.face("+Z").corner("+X+Y").offset(x=5, y=-3)`, and the face's grid moves to start at that
   feature, so the grid lines near a corner run exactly through it whatever the face's shape. It
   snaps to the visible grid. Orange dots are snap points (every corner, edge middle, arc centre,
   hole and boss centre, and the centre); within 16 px of one, it wins.
@@ -180,7 +180,11 @@ in a field updates the ghost. The arrows only change the dialog's numbers; one s
 - **Move** (⌃M): drag the arrows to slide and the rings to turn (0.5 mm and 5° steps; Shift for
   0.1 mm and 1°), or type values. The body moves on screen as you go. **Pivot**: click Set, then
   any point; turns happen about it (default: the body's origin). **Point to point** (⌃⇧M): click
-  a point on the moving body, then where it should go.
+  a point on the moving body, then where it should go. **Several bodies**: Shift-select them before
+  opening Move, or click bodies while it's open (click one again to take it out); they move
+  together, about the first one's origin and along its axes. **Result: Copy** leaves the originals
+  where they are and moves copies (`copy1 = move(body=[plate, post], dx=60, copy=True)` makes
+  `copy1` and `copy1_1`; `copy1[1]` in a script). Both work in Point to point too.
 - **View.** The **ViewCube** (top right) turns with the camera: click any of its faces, edges or
   corners to look from there, drag it to orbit, or use the home and fit buttons under it. The world
   origin and the X (red), Y (green) and Z (blue) axes are always drawn. The **grid follows the
@@ -341,12 +345,30 @@ tool's name (`plate.face("post.side")`); fillet and chamfer faces are named afte
 (`fillet1(+X+Z)`); a face split into pieces becomes `+Z#0`, `+Z#1`, ordered along X, then Y.
 `plate.face("+Z")` still returns every piece.
 
-**Points on a face**: `face.hole(i)` and `face.boss(i)` (centers of round holes and round
-features standing on the face) always exist. Every flat face also has `face.corner(i)` (the
-corners of its outline, notches and cut-outs included), `face.mid(i)` (the middle of each outline
-edge), `face.arc(i)` (the centre of each round edge) and `face.inner(i)` (the corners of openings
-that aren't round, like a square hole or a slot), however odd its shape. Corners run
-counterclockwise from the one nearest angle 0.
+**Points on a face** are named after the faces that make them, so a name stays with its point
+whatever later steps add to the face:
+
+| point | name | example |
+|---|---|---|
+| `face.corner(name)` | the faces either side of the corner, counterclockwise | `plate.face("+Z").corner("+X+Y")`, `corner("+X\|fillet1(+X+Y)")` |
+| `face.mid(name)` | the face across the edge | `plate.face("+Z").mid("+Y")` |
+| `face.arc(name)` | the face the round edge bounds | `plate.face("+Z").arc("fillet1(+X+Y)")`, `arc("cutter.side")` |
+| `face.hole(name)`, `face.boss(name)` | the hole's wall, the boss's side | `plate.face("+Z").hole("body1.side")` |
+| `face.inner(name)` | corners of openings that aren't round (a square hole, a slot) | `inner("slot.-X\|slot.+Y")` |
+
+Holes and bosses exist on any face; the rest on every flat face, however odd its shape (notches
+and cut-outs included). Two points that would share a name (one face meeting another twice) get
+`~2`, `~3`... in order along the face. Clicking a point in the app writes its name; the
+**Attributes** panel lists every point of a body by name.
+
+If an earlier step changes the face so that a named point no longer exists (a fillet on the
+corner you picked), the step using it **fails and says which names the face has now**: it is
+never quietly moved to another point.
+
+Numbers still work (`corner(0)`, `arc(1)`: the point's place counterclockwise from angle 0),
+but they are a trap: a fillet or cut added earlier in the timeline renumbers the face, and
+`arc(0)` becomes a different arc. When a file picks points by number the app says so and offers
+**Name them**, which rewrites each one to its name (one undo step; the part doesn't move).
 
 **Design anchors vs topology anchors.** `plate.anchor("+Z")` is computed from the box's
 parameters, so cuts and fillets never move it. `plate.face("+Z").anchor()` follows the real
@@ -530,6 +552,15 @@ Python are not touched. Send the `.dmg`: it contains the app, an Applications sh
 Developer signature, so macOS asks once. The app writes its log to
 `~/Library/Logs/OpenFusion.log`, recent files to `~/Library/Application Support/OpenFusion`,
 and example copies to `~/Documents/OpenFusion`.
+
+**Saving.** Every change is written through a temporary file beside the part, so a crash can't
+leave half a file. Where macOS lets the app write the part but not create a file next to it (a
+part opened by double-click in a folder the app hasn't been allowed into), it writes into the
+part itself. If the part can't be written at all (Documents access denied, a full or read-only
+disk) the change is kept in the app, a copy goes to `~/Library/Application Support/OpenFusion/Unsaved`,
+and a red banner says why with a **Save a Copy As…** button; the next change tries again. The app
+asks for Documents access with its own message (allow it in System Settings › Privacy & Security
+› Files and Folders).
 
 **Local network.** The app's window talks to its own engine over `127.0.0.1` (this computer only;
 nothing is reachable from the network). Older versions looked up the computer's network name on

@@ -104,12 +104,19 @@ class App {
     $("redo").disabled = !st.redo; $("redo").title = st.redo ? `Redo ${st.redo} (⇧${undoKey})` : "Nothing to redo";
     this.setPerf(st.ms);
     const d = st.desc, sc = st.scene;
-    if (!d.ok) this.banner(`The script has a syntax error (${d.error}). Showing the last version that worked until you fix it in the script pane.`, true);
+    if (st.save_error) this.banner(st.save_error, true, { label: "Save a Copy As…",
+      run: () => (this.state.app ? this.fileAction("save_as", { choose: true, open: true }) : this.openDocs()) });
+    else if (!d.ok) this.banner(`The script has a syntax error (${d.error}). Showing the last version that worked until you fix it in the script pane.`, true);
     else if (sc.script_error) this.banner(`The script stopped at line ${sc.script_error_line}: ${sc.script_error}`, true);
     else if (d.shadowed && d.shadowed.length) {
       const sh = d.shadowed[0], more = d.shadowed.length > 1 ? ` (and ${d.shadowed.length - 1} more)` : "";
       this.banner(`The name ${sh.variable} is used for two steps (lines ${sh.line} and ${sh.again})${more}. The script keeps only the second, so the first one shows as ${sh.name}, and "${sh.variable}.…" face names point at the second.`,
         true, { label: `Name it ${sh.name}`, run: () => this.action("/api/fix_names", {}).then(() => toast("Each step has its own name now")).catch(() => {}) });
+    }
+    else if (st.numbered_points && st.numbered_points.length) {
+      const n = st.numbered_points.length, ex = st.numbered_points[0];
+      this.banner(`${n} point${n > 1 ? "s are" : " is"} picked by number (${ex}${n > 1 ? "…" : ""}). A number is the point's place around the face, so a fillet or cut added before it can move it to a different point. Names stay with their point.`,
+        false, { label: "Name them", run: () => this.action("/api/name_points", {}).then((o) => toast(`Named ${o.changed} point${o.changed === 1 ? "" : "s"}`)).catch(() => {}) });
     }
     else if (!d.gui) this.banner(`Code-only mode: line ${d.blockers.join(", ")} uses code the timeline cannot show (a loop or function). New features still work; edit existing ones in the script.`);
     else this.banner(null);
@@ -302,8 +309,12 @@ class App {
       const bodies = [...new Set(sel.filter((s) => s.body).map((s) => s.body))];
       const fields = t.fields || [];
       const has = (key) => fields.some((f) => f.key === key);
-      const bodyField = fields.find((f) => f.kind === "body" && !f.hidden && !f.noAuto);
-      if (bodyField && bodies.length && (BODY_TOOLS.has(id) || sel.some((s) => s.kind === "body"))) preset[bodyField.key] = this.exprFor(bodies[0], true);
+      const bodyField = fields.find((f) => (f.kind === "body" || (f.kind === "bodies" && f.bare)) && !f.hidden && !f.noAuto);
+      if (bodyField && bodies.length && (BODY_TOOLS.has(id) || sel.some((s) => s.kind === "body"))) {
+        // a tool that takes several bodies (Move) gets every selected one
+        preset[bodyField.key] = bodyField.kind === "bodies" && bodies.length > 1
+          ? `[${bodies.map((b) => this.exprFor(b, true)).join(", ")}]` : this.exprFor(bodies[0], true);
+      }
       if (has("tools") && bodies.length > 1) preset.tools = `[${bodies.slice(1).map((b) => this.exprFor(b, true)).join(", ")}]`;
       if (has("edges")) {
         const first = sel.find((s) => s.kind === "edge" || s.kind === "face");

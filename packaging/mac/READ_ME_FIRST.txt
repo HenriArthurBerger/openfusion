@@ -25,6 +25,14 @@ registered with Apple. macOS stops it the first time; you allow it once.
 
 After that it opens normally.
 
+DOCUMENTS FOLDER
+OpenFusion keeps your parts in Documents/OpenFusion. The first time, macOS
+asks whether OpenFusion may use the Documents folder: click Allow. (Each new
+test build may ask again.) If you clicked Don't Allow, a red "Not saved"
+banner appears; turn it on in System Settings > Privacy & Security >
+Files and Folders > OpenFusion > Documents Folder. Your changes are kept
+while the app is open, and File > Save a Copy As... saves them elsewhere.
+
 USING IT
 - Start with New part, or open an example (it opens as a copy in
   Documents/OpenFusion, so you can't break the original).

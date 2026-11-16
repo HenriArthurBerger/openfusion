@@ -189,17 +189,30 @@ def _place_on_bed(ctx, body, face="-Z"):
     ctx.put(b.moved(m, ctx.fid))
 
 
-@_record("modify")
-def _move(ctx, body, dx=0.0, dy=0.0, dz=0.0, rx=0.0, ry=0.0, rz=0.0, frame="local", along=None, pivot=None,
-          to=None, point=None):
-    """Move a body: rotate, then translate (like Fusion's Move).
-    Axes: frame='local' (default) uses the body's own axes, or the anchor `along`;
+def _move_impl(ctx, body, dx=0.0, dy=0.0, dz=0.0, rx=0.0, ry=0.0, rz=0.0, frame="local", along=None, pivot=None,
+               to=None, point=None, copy=False):
+    """Move bodies: rotate, then translate (like Fusion's Move).
+    body: one body, or a list of them (they move together; the first one's axes and origin
+    are the default axes, pivot and point). copy=True leaves the originals where they are and
+    moves copies of them instead (the step's own bodies: move1, or move1, move1_1, ... for several).
+    Axes: frame='local' (default) uses the (first) body's own axes, or the anchor `along`;
     frame='world' uses world X/Y/Z.
     rx, ry, rz: degrees about those axes through `pivot` (an anchor; default the body origin),
     applied X, then Y, then Z. dx, dy, dz: distance along those axes.
     Point to point: to= an anchor, snap point or (x, y, z); the body moves so `point`
     (an anchor; default the body origin) lands there. dx/dy/dz then add an offset."""
-    b = ctx.body(body)
+    items = list(body) if isinstance(body, (list, tuple)) else [body]
+    bodies = []
+    for it in items:
+        if isinstance(it, GroupHandle):               # a pattern: all of it
+            bodies += [ctx.state[i] for i in it.members(ctx)]
+        else:
+            bodies.append(ctx.body(it))
+    if not bodies:
+        raise ValueError("give the body (or bodies) to move")
+    if len({b.id for b in bodies}) != len(bodies):
+        raise ValueError("a body is in the list twice")
+    b = bodies[0]
     if frame not in ("local", "world"):
         raise ValueError("frame must be 'local' or 'world'")
     f = (ctx.frame(along) if along is not None else b.frame) if frame == "local" else Frame.world()
@@ -214,7 +227,48 @@ def _move(ctx, body, dx=0.0, dy=0.0, dz=0.0, rx=0.0, ry=0.0, rz=0.0, frame="loca
         src = ctx.frame(point).origin if point is not None else b.frame.origin
         src = (m @ np.append(src, 1.0))[:3]
         v = v + (target - src)
-    ctx.put(b.moved(translation(v) @ m, ctx.fid))
+    tm = translation(v) @ m
+    if not copy:
+        for x in bodies:
+            ctx.put(x.moved(tm, ctx.fid))
+        return
+    ids = []
+    for k, x in enumerate(bodies):
+        cid = ctx.fid if k == 0 else f"{ctx.fid}_{k}"
+        ctx.put(x.renamed_copy(cid, ctx.fid).moved(tm, ctx.fid))
+        ids.append(cid)
+    ctx.groups[ctx.fid] = ids
+    ctx.info["copies"] = ids
+
+
+def _move(ctx, body, dx=0.0, dy=0.0, dz=0.0, rx=0.0, ry=0.0, rz=0.0, frame="local", along=None, pivot=None,
+          to=None, point=None, copy=False):
+    _move_impl(ctx, body, dx, dy, dz, rx, ry, rz, frame, along, pivot, to, point, copy)
+
+
+_move.__doc__ = _move_impl.__doc__
+_move_modify = _record("modify")(_move)
+_move_create = _record("create")(_move)
+_move_group = _record("group")(_move)
+
+
+def move(body, dx=0.0, dy=0.0, dz=0.0, rx=0.0, ry=0.0, rz=0.0, frame="local", along=None, pivot=None,
+         to=None, point=None, copy=False):
+    kw = dict(dx=dx, dy=dy, dz=dz, rx=rx, ry=ry, rz=rz, frame=frame, along=along, pivot=pivot, to=to, point=point)
+    if copy:
+        kw["copy"] = True
+    several = isinstance(body, (list, tuple)) and (len(body) > 1 or any(isinstance(x, GroupHandle) for x in body)) \
+        or isinstance(body, GroupHandle)
+    if not copy:
+        # the handle is the (first) moved body, as for any change to a body
+        return _move_modify(body=body, **kw)
+    if several:
+        rec = _move_group(body=body, **kw)
+        return GroupHandle(rec._feature, Handle(rec._feature))
+    return _move_create(body=body, **kw)
+
+
+move.__doc__ = _move_impl.__doc__
 
 
 @_record("modify")
@@ -914,7 +968,7 @@ def _remove(ctx, body):
 
 # public names
 box, cylinder, cone, sphere, torus, coil, polygon, gear = _box, _cylinder, _cone, _sphere, _torus, _coil, _polygon, _gear
-place, place_on_bed, move, rotate, copy = _place, _place_on_bed, _move, _rotate, _copy
+place, place_on_bed, rotate, copy = _place, _place_on_bed, _rotate, _copy     # (move is above: it can copy)
 pattern_rect, pattern_circ, mirror, scale = _pattern_rect, _pattern_circ, _mirror, _scale
 fillet, chamfer, extrude, split = _fillet, _chamfer, _extrude, _split
 set_anchor, set_role, remove = _set_anchor, _set_role, _remove

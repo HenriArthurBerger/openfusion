@@ -16,7 +16,7 @@ pw = pytest.importorskip("playwright.sync_api")
 # which hangs the whole run; they get a limit they won't hit on a busy machine.
 pytestmark = pytest.mark.limit(90)
 
-from openfusion import Engine  # noqa: E402
+from openfusion import Engine, topo  # noqa: E402
 from openfusion.gui.server import make_server  # noqa: E402
 
 START = '''from openfusion import *
@@ -300,6 +300,7 @@ def test_sketch_mode_draws_constrains_and_writes_a_sketch(page):
     r = Engine().run_file(str(f))
     assert r.ok, r.report()
     # edit it: the statement comes back apart, and finishing again rewrites it in place
+    pg.wait_for_function("window.ofApp.state.desc.features.some((x) => x.name === 'sketch1')")
     pg.evaluate("() => window.ofApp.editFeature('sketch1')")
     pg.wait_for_function("window.ofApp.dialog && window.ofApp.dialog.solved && Object.keys(window.ofApp.dialog.model.curves).length === 5")
     pg.click("#sk-ok")
@@ -401,6 +402,30 @@ def test_reused_names_banner_fixes_the_file(page):
     pg.click("#banner button")
     pg.wait_for_function("window.ofApp.state.desc.shadowed.length === 0")
     assert pg.is_hidden("#banner") and "extrude1 = extrude(" in f.read_text()
+    assert not errors, errors
+
+
+def test_numbered_points_banner_names_them_and_a_failed_save_says_so(page):
+    pg, f, errors = page
+    src = START + ('cutter = cylinder(r=6, h=10, at=world.point(0, 15, 0))\n'
+                   'cut1 = cut(target=plate, tools=[cutter])\n'
+                   'pin = cylinder(r=2, h=5, at=plate.face("+Z").arc(0))\n')
+    pg.evaluate("(t) => window.ofApp.action('/api/script', {text: t})", src)
+    pg.wait_for_selector("#banner button", timeout=15000)
+    assert "picked by number" in pg.inner_text("#banner") and 'plate.face("+Z").arc(0)' in pg.inner_text("#banner")
+    pg.click("#banner button")
+    pg.wait_for_function("window.ofApp.state.numbered_points.length === 0")
+    assert 'at=plate.face("+Z").arc("cutter.side#0"))' in f.read_text() and pg.is_hidden("#banner")
+    # the attributes panel lists points by name
+    pg.evaluate("() => window.ofApp.openAttrs('plate')")
+    pg.wait_for_selector("#attrs .at-list li[data-key]")
+    names = pg.eval_on_selector_all("#attrs .at-list .nm", "els => els.map(e => e.textContent)")
+    assert "+Z · arc centre cutter.side#0" in names and "+Z · corner +X+Y" in names, names
+    # a save the folder refuses: the change stays, a red banner says why and offers a copy
+    pg.evaluate("(m) => { const a = window.ofApp; a.setState({...a.state, save_error: m}); }",
+                "Not saved to gui.ofs: macOS didn't let OpenFusion write to ~/x.")
+    assert "Not saved to gui.ofs" in pg.inner_text("#banner") and pg.inner_text("#banner button") == "Save a Copy As…"
+    assert "err" in pg.get_attribute("#banner", "class")
     assert not errors, errors
 
 
@@ -770,7 +795,7 @@ def test_an_odd_shaped_face_offers_its_corners_and_lines_its_grid_up_with_one(pa
     xy = pg.evaluate("""() => { const a = window.ofApp; const r = a.vp.canvas.getBoundingClientRect();
         const s = a.vp.toScreen([0.4, 29.7, 15]); return [r.left + s[0], r.top + s[1]]; }""")
     c = pg.evaluate("(xy) => { const d = window.ofApp.dialog; d.hover({clientX: xy[0], clientY: xy[1], buttons: 0}); return d.cands[0]; }", xy)
-    assert c["kind"] == "free" and re.search(r'\.corner\(\d+\)$', c["ref"]), c["ref"]
+    assert c["kind"] == "free" and re.search(r'\.corner\("[^"]+"\)$', c["ref"]), c["ref"]
     assert c["p"] == pytest.approx([0, 30, 15])
     assert pg.evaluate("() => window.ofApp.vp.localFrame.o") == pytest.approx([0, 30, 15])
     assert not errors, errors
@@ -1054,4 +1079,47 @@ def test_sketch_constraint_tools_wait_for_picks_snaps_and_keeping_work(page):
     pg.wait_for_function("window.ofApp.state.desc.features.some(f => f.op === 'sketch')")
     text = f.read_text()
     assert "sketch1 = sketch(" in text and '"midpoint"' in text and '"tangent"' in text
+    assert not errors, errors
+
+
+def test_move_tool_takes_several_bodies_and_copies(page):
+    pg, f, errors = page
+    src = START + 'post = cylinder(r=3, h=12, at=world.point(40, 0, 0))\nbump = sphere(r=4, at=world.point(0, 40, 0))\n'
+    pg.evaluate("(t) => window.ofApp.action('/api/script', {text: t})", src)
+    pg.wait_for_function("window.ofApp.vp.body('bump')")
+    # select two bodies, open Move: both are in it
+    pg.evaluate("""() => { const a = window.ofApp;
+        a.selection = ['plate', 'post'].map(b => ({kind: 'body', body: b, ref: b, key: 'body:' + b}));
+        a.openTool('move'); }""")
+    pg.wait_for_selector('#dialog [data-key="body"]')
+    assert pg.input_value('#dialog [data-key="body"]') == "[plate, post]"
+    # clicking a third body adds it, clicking it again takes it out
+    pg.evaluate("() => window.ofApp.dialog.takeBody('bump')")
+    assert pg.input_value('#dialog [data-key="body"]') == "[plate, post, bump]"
+    pg.evaluate("() => window.ofApp.dialog.takeBody('bump')")
+    assert pg.input_value('#dialog [data-key="body"]') == "[plate, post]"
+    # a copy, 60 along world X: the originals stay, two copies appear
+    pg.select_option('#dialog select[data-key="copy"]', "True")
+    pg.select_option('#dialog select[data-key="frame"]', "world")
+    pg.fill('#dialog [data-key="dx"]', "60")
+    pg.press('#dialog [data-key="dx"]', "Tab")
+    pg.wait_for_function("document.getElementById('dlg-stmt').textContent.includes('copy=True')")
+    pg.wait_for_function("window.ofApp.vp.data.bodies.some(b => b.id === 'copy1_1')")     # the copy is shown
+    pg.click("#dlg-ok")
+    pg.wait_for_function("document.getElementById('dialog').hidden && window.ofApp.vp.body('copy1_1')")
+    text = f.read_text()
+    assert "copy1 = move(body=[plate, post]" in text and "copy=True" in text
+    r = Engine().run_file(str(f))
+    assert r.ok, r.report()
+    assert topo.bbox(r.bodies["copy1"].shape)[0][0] == pytest.approx(topo.bbox(r.bodies["plate"].shape)[0][0] + 60)
+    assert topo.bbox(r.bodies["copy1_1"].shape)[0][0] == pytest.approx(37 + 60)
+    # one body: written plainly, and a plain move
+    pg.evaluate("""() => { const a = window.ofApp; a.selection = [{kind: 'body', body: 'bump', ref: 'bump', key: 'body:bump'}]; a.openTool('move'); }""")
+    pg.wait_for_selector('#dialog [data-key="body"]')
+    assert pg.input_value('#dialog [data-key="body"]') == "bump"
+    pg.fill('#dialog [data-key="dz"]', "5")
+    pg.press('#dialog [data-key="dz"]', "Tab")
+    pg.click("#dlg-ok")
+    pg.wait_for_function("document.getElementById('dialog').hidden")
+    assert "move(body=bump, dz=5)" in f.read_text()
     assert not errors, errors

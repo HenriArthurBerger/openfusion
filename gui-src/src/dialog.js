@@ -103,7 +103,10 @@ export class Dialog {
     const f = this.field(key);
     if (!f) return "";
     if (f.kind === "path") { const l = this.items[key] || []; return l.length === 1 && !l[0].includes(".edge") && !l[0].includes(".edges(") ? l[0] : l.length ? `[${l.join(", ")}]` : ""; }
-    if (MULTI.has(f.kind)) return (this.items[key] || []).length ? `[${this.items[key].join(", ")}]` : "";
+    if (MULTI.has(f.kind)) {
+      const l = this.items[key] || [];
+      return !l.length ? "" : f.bare && l.length === 1 ? l[0] : `[${l.join(", ")}]`;     // one body: written plainly
+    }
     return this.values[key] || "";
   }
 
@@ -761,7 +764,9 @@ export class Dialog {
   }
 
   takeBody(id) {
-    const f = this.field(this.active);
+    let f = this.field(this.active);
+    // Move: clicking bodies adds them to (or takes them out of) the list whatever field is active
+    if ((!f || (f.kind !== "body" && f.kind !== "bodies")) && this.tool.op === "move" && this.id === "move") f = this.field("body");
     if (f && this.isProfile(id) && (f.kind === "face" || f.kind === "faces" || f.kind === "path")) {
       const e = this.app.exprFor(id, true);
       if (f.kind === "faces") this.toggleItem(f.key, e, "body:" + id);
@@ -774,7 +779,8 @@ export class Dialog {
     const list = this.items[f.key] || [];
     const i = list.indexOf(e);
     if (i >= 0) list.splice(i, 1); else list.push(e);
-    this.setSlot(f.key, `[${list.join(", ")}]`);
+    this.setSlot(f.key, f.bare && list.length === 1 ? list[0] : list.length ? `[${list.join(", ")}]` : "");
+    if (this.gizmo) this.placeGizmo();
     return true;
   }
 
@@ -916,8 +922,18 @@ export class Dialog {
     this.placeGizmo();
   }
 
+  // the bodies being moved (Move takes several): their ids in the scene
+  movedIds() {
+    const f = this.field("body");
+    const list = f && f.kind === "bodies" ? (this.items.body || []) : [this.values.body].filter(Boolean);
+    return list.map((e) => this.bodyIdOf(e)).filter(Boolean);
+  }
+
+  // a copy is shown by building it (the originals stay put); a plain move is shown by sliding the body
+  get building() { return this.live || this.values.copy === "True"; }
+
   moveGeometry() {
-    const id = this.bodyIdOf(this.values.body);
+    const ids = this.movedIds(), id = ids[0];
     const bf = id && this.baseScene ? this.vp.bodyFrame(id, this.baseScene) : null;
     if (!bf) return null;
     let axes = this.values.frame === "world" ? WORLD_FRAME : bf;
@@ -936,7 +952,7 @@ export class Dialog {
     }
     const v = X.clone().multiplyScalar(this.num("dx")).add(Y.clone().multiplyScalar(this.num("dy"))).add(Z.clone().multiplyScalar(this.num("dz")));
     m.premultiply(new THREE.Matrix4().makeTranslation(v.x, v.y, v.z));
-    return { id, frame: { ...axes, o: c.clone().add(v).toArray() }, m };
+    return { id, ids, frame: { ...axes, o: c.clone().add(v).toArray() }, m };
   }
 
   placeGizmo() {
@@ -944,9 +960,9 @@ export class Dialog {
     const g = this.moveGeometry();
     if (!g) { this.gizmo.hide(); return; }
     this.gizmo.show(g.frame);
-    if (!this.live) {   // show the move on screen without building it
+    if (!this.building) {   // show the move on screen without building it
       if (this.vp.data !== this.baseScene) this.vp.setScene(this.baseScene);
-      this.vp.setBodyTransform(g.id, g.m);
+      for (const id of g.ids) this.vp.setBodyTransform(id, g.m);
     }
   }
 
@@ -954,7 +970,7 @@ export class Dialog {
     this.dragging = true;
     this.dragStart = Object.fromEntries(["dx", "dy", "dz", "rx", "ry", "rz"].map((k) => [k, this.num(k)]));
     if (this.baseScene && this.vp.data !== this.baseScene) this.vp.setScene(this.baseScene);
-    const g = this.moveGeometry(); if (g) this.vp.setBodyTransform(g.id, g.m);
+    const g = this.moveGeometry(); if (g) for (const id of g.ids) this.vp.setBodyTransform(id, g.m);
   }
 
   gizmoDrag(kind, axis, v) {
@@ -962,7 +978,7 @@ export class Dialog {
     this.setVal(key, fmt(this.dragStart[key] + v), false);
     const g = this.moveGeometry();
     if (!g) return;
-    this.vp.setBodyTransform(g.id, g.m);
+    for (const id of g.ids) this.vp.setBodyTransform(id, g.m);
     this.gizmo.moveTo(g.frame.o);
     this.app.showTip(kind === "move" ? `${axis.toUpperCase()} ${fmt(this.dragStart[key] + v)} mm` : `${axis.toUpperCase()} ${fmt(this.dragStart[key] + v)}°`);
   }
@@ -1002,7 +1018,7 @@ export class Dialog {
 
   scheduleStatement() {
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => (this.tool.inspect ? this.inspect() : this.live ? this.livePreview() : this.statement()), this.live ? 160 : 90);
+    this.timer = setTimeout(() => (this.tool.inspect ? this.inspect() : this.building ? this.livePreview() : this.statement()), this.building ? 160 : 90);
   }
 
   setResult(cls, text) { const r = $("dlg-result"); if (r) { r.className = "dlg-result " + cls; r.textContent = text; } }

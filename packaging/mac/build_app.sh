@@ -118,6 +118,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>NSRequiresAquaSystemAppearance</key><false/>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+  <key>NSDocumentsFolderUsageDescription</key><string>OpenFusion keeps your parts in Documents/OpenFusion and saves every change there.</string>
+  <key>NSDesktopFolderUsageDescription</key><string>OpenFusion saves parts you keep on the Desktop.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>OpenFusion opens and saves parts and imports in Downloads.</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>OpenFusion opens and saves parts on external drives.</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

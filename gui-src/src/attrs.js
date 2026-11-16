@@ -30,6 +30,15 @@ function polyMid(p) {
   return [p[k], p[k + 1], p[k + 2]];
 }
 
+// "body.face("+Z").arc("fillet1(+X+Y)")" -> "+Z · arc centre fillet1(+X+Y)"
+const POINT_WORDS = { anchor: "centre", corner: "corner", mid: "middle of", arc: "arc centre", hole: "hole", boss: "boss", inner: "opening corner" };
+export function pointName(ref) {
+  const m = String(ref).match(/\.face\(("(?:[^"\\]|\\.)*")\)\.(\w+)\((\d*|"(?:[^"\\]|\\.)*")\)$/);
+  if (!m) return ref;
+  const arg = m[3].startsWith('"') ? JSON.parse(m[3]) : m[3];
+  return `${JSON.parse(m[1])} · ${POINT_WORDS[m[2]] || m[2]}${arg !== "" ? " " + arg : ""}`;
+}
+
 export class AttributesPanel {
   constructor(app, bodyId) {
     this.app = app; this.vp = app.vp; this.id = bodyId;
@@ -55,8 +64,7 @@ export class AttributesPanel {
       for (const s of f.snaps || []) {
         if (seen.has(s.ref)) continue;
         seen.add(s.ref);
-        const m = s.ref.match(/\.face\(("(?:[^"\\]|\\.)*")\)\.(\w+)\((\d*)\)$/);
-        const name = m ? `${JSON.parse(m[1])} ${m[2] === "anchor" ? "centre" : m[2] + (m[3] ? " " + m[3] : "")}` : s.ref;
+        const name = pointName(s.ref);
         points.push({ key: "s:" + s.ref, name, detail: `${s.kind} ${xyz(s.o)}`, ref: s.ref, kind: "point", point: s.o, frame: s, group: "On faces" });
       }
     }

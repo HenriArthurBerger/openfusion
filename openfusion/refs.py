@@ -31,6 +31,11 @@ class RefError(Exception):
     """A name could not be resolved and no fallback applies."""
 
 
+def _q(text: str) -> str:
+    import json
+    return json.dumps(text)
+
+
 def sig(x) -> str:
     """Stable textual signature used for cache keys."""
     if isinstance(x, (Handle, GroupHandle, Ref)):
@@ -287,22 +292,22 @@ class FaceRef(Ref):
     def anchor(self) -> "FaceAnchorRef":
         return FaceAnchorRef(self)
 
-    def corner(self, i: int) -> "FacePointRef":
+    def corner(self, i: "int | str") -> "FacePointRef":
         return FacePointRef(self, "corner", i)
 
-    def mid(self, i: int) -> "FacePointRef":
+    def mid(self, i: "int | str") -> "FacePointRef":
         return FacePointRef(self, "mid", i)
 
-    def hole(self, i: int) -> "FacePointRef":
+    def hole(self, i: "int | str") -> "FacePointRef":
         return FacePointRef(self, "hole", i)
 
-    def arc(self, i: int) -> "FacePointRef":
+    def arc(self, i: "int | str") -> "FacePointRef":
         return FacePointRef(self, "arc", i)
 
-    def boss(self, i: int) -> "FacePointRef":
+    def boss(self, i: "int | str") -> "FacePointRef":
         return FacePointRef(self, "boss", i)
 
-    def inner(self, i: int) -> "FacePointRef":
+    def inner(self, i: "int | str") -> "FacePointRef":
         """A corner of an opening in the face that isn't round (a square hole, a slot)."""
         return FacePointRef(self, "inner", i)
 
@@ -374,18 +379,70 @@ class FaceAnchorRef(FrameRef):
 MAX_SIMPLE_EDGES = 400        # beyond this (engraved text, imported meshes) a face offers no corners
 
 
+def _neighbour(body: Body, efmap, face, edge) -> str:
+    """Name of the face on the other side of one of `face`'s edges."""
+    for g in efmap.get(edge, []):
+        if not g.IsSame(face):
+            return body.label_of(g) or "?"
+    return "open"
+
+
+def _pair_name(a: str, b: str) -> str:
+    """A corner, named after the two faces either side of it ('+X+Y' between two sides of a
+    box, 'fillet1(+X+Y)|+Y' otherwise; in counterclockwise order about the face)."""
+    from .body import SIGN_FACE, AXIS_ORDER
+    if SIGN_FACE.match(a) and SIGN_FACE.match(b) and a[1] != b[1]:
+        a, b = sorted([a, b], key=lambda t: AXIS_ORDER[t[1]])
+        return a + b
+    return f"{a}|{b}"
+
+
+def _unique_names(items: list, frame: Frame) -> list:
+    """[(name, point)] -> the same with each name used once: the same name at the same spot is
+    one point (two arcs of one cut cylinder share a centre); the same name somewhere else gets
+    ~2, ~3... in order of where the points are on the face."""
+    by = {}
+    for n, p in items:
+        by.setdefault(n, [])
+        if not any(float(np.linalg.norm(p - q)) < 1e-6 for q in by[n]):
+            by[n].append(p)
+    rename = {}
+    for n, ps in by.items():
+        if len(ps) > 1:
+            order = sorted(range(len(ps)), key=lambda i: tuple(np.round(frame.to_local(ps[i])[:2], 6)))
+            for rank, i in enumerate(order):
+                rename[(n, i)] = n if rank == 0 else f"{n}~{rank + 1}"
+    out, done = [], set()
+    for n, p in items:
+        i = next(k for k, q in enumerate(by[n]) if float(np.linalg.norm(p - q)) < 1e-6)
+        nm = rename.get((n, i), n)
+        if nm not in done:
+            done.add(nm)
+            out.append((nm, p))
+    return out
+
+
 def face_points(body: Body, face, frame: Frame) -> dict:
     """Named points on a face. On every flat face: its outline's corners, the middles of its
     edges and the centres of its arcs (whatever the outline is made of, notches and cut-outs
     included), and the corners of its non-round openings ("inner"). On any face: the centres
-    of circular holes and bosses (round features standing on the face)."""
+    of circular holes and bosses (round features standing on the face).
+
+    Each kind comes twice: as a list by position (corner(0), arc(1): the old numbering, which
+    a later fillet or cut can shift), and under "named" as (name, point) pairs whose names come
+    from the faces that make each point (an arc is named after the face it bounds, a corner
+    after the faces either side of it). A name stays with its point whatever is added to the
+    face later, and is gone, not handed to another point, when its point goes."""
     out = {"corner": [], "mid": [], "arc": [], "hole": [], "boss": [], "inner": [], "simple": False}
+    named = {k: [] for k in ("corner", "mid", "arc", "hole", "boss", "inner")}
+    out["named"] = named
     planar = topo.surface_kind(face) == "plane"
     ow = topo.outer_wire(face)
     efmap = topo.edge_face_map(body.shape)
     inner_loops = []
     # inner circular loops: a hole if the wall beyond it goes into the material
     # (below the face), a boss if it rises above the face
+    rounds = {"hole": [], "boss": []}
     for w in topo.wires(face):
         if w.IsSame(ow):
             continue
@@ -401,9 +458,13 @@ def face_points(body: Body, face, frame: Frame) -> dict:
         side = 0.0
         if walls:
             side = float((topo.face_area_centroid(walls[0])[1] - cs[0][0]) @ frame.z)
-        out["boss" if side > 0 else "hole"].append(cs[0][0])
+        k = "boss" if side > 0 else "hole"
+        out[k].append(cs[0][0])
+        rounds[k].append(((body.label_of(walls[0]) or "?") if walls else "open", cs[0][0]))
     for k in ("hole", "boss"):
         out[k].sort(key=lambda p: tuple(np.round(frame.to_local(p)[:2], 6)))
+        rounds[k].sort(key=lambda it: tuple(np.round(frame.to_local(it[1])[:2], 6)))
+        named[k] = _unique_names(rounds[k], frame)
     oedges = topo.ordered_wire_edges(ow, face)
     if not planar or len(oedges) > MAX_SIMPLE_EDGES:
         return out
@@ -412,20 +473,27 @@ def face_points(body: Body, face, frame: Frame) -> dict:
     loops = []
     for w in inner_loops:
         vs = topo.ordered_wire_vertices(w, face)
-        if len(vs) >= 2 and len(vs) <= MAX_SIMPLE_EDGES:
+        ws = topo.ordered_wire_edges(w, face)
+        if len(vs) >= 2 and len(vs) <= MAX_SIMPLE_EDGES and len(ws) == len(vs):
             lc = frame.to_local(np.mean(vs, axis=0))
+            nb = [_neighbour(body, efmap, face, e) for e in ws]
+            # vertex i joins edge i-1 and edge i (in the loop's own direction)
+            names = [_pair_name(nb[i - 1], nb[i]) for i in range(len(vs))]
 
             def turn(p, lc=lc):
                 d = frame.to_local(p) - lc
                 a = math.degrees(math.atan2(d[1], d[0])) % 360
                 return round(min(a, 360 - a), 6)
             k = min(range(len(vs)), key=lambda i: (turn(vs[i]), i))
-            loops.append((tuple(np.round(lc[:2], 6)), vs[k:] + vs[:k]))
-    for _, vs in sorted(loops, key=lambda x: x[0]):
+            loops.append((tuple(np.round(lc[:2], 6)), vs[k:] + vs[:k], names[k:] + names[:k]))
+    inner_named = []
+    for _, vs, names in sorted(loops, key=lambda x: x[0]):
         out["inner"] += vs
+        inner_named += list(zip(names, vs))
+    named["inner"] = _unique_names(inner_named, frame)
     verts = topo.ordered_wire_vertices(ow, face)
     n = len(verts)
-    if n < 2:
+    if n < 2 or len(oedges) != n:
         return out
     # ensure counterclockwise about the outward normal
     area = sum(np.cross(verts[i] - frame.origin, verts[(i + 1) % n] - frame.origin) @ frame.z for i in range(n))
@@ -445,21 +513,47 @@ def face_points(body: Body, face, frame: Frame) -> dict:
     out["mid"] = [topo.edge_midpoint(e) for e in oedges]
     out["arc"] = [topo.circle_center_radius(e)[0] for e in oedges if topo.edge_kind(e) == "circle"]
     out["simple"] = True
+    nb = [_neighbour(body, efmap, face, e) for e in oedges]
+    # corner i is where edge i-1 ends and edge i starts
+    named["corner"] = _unique_names([(_pair_name(nb[i - 1], nb[i]), verts[i]) for i in range(n)], frame)
+    named["mid"] = _unique_names([(nb[i], out["mid"][i]) for i in range(n)], frame)
+    named["arc"] = _unique_names([(nb[i], topo.circle_center_radius(e)[0]) for i, e in enumerate(oedges)
+                                  if topo.edge_kind(e) == "circle"], frame)
     return out
 
 
+def point_name(pts: dict, kind: str, p) -> str | None:
+    """The stable name of the point at `p` (one of face_points' points of that kind)."""
+    for nm, q in pts["named"].get(kind, []):
+        if float(np.linalg.norm(np.asarray(p) - q)) < 1e-6:
+            return nm
+    return None
+
+
 class FacePointRef(FrameRef):
-    def __init__(self, face_ref: FaceRef, kind: str, index: int):
+    """A point on a face: by name (corner("+X+Y"), arc("fillet1(+X+Y)"): stays with its point
+    or fails, never moves to another one) or by number (corner(0): its place in the outline,
+    which later steps can shift)."""
+
+    def __init__(self, face_ref: FaceRef, kind: str, index):
         super().__init__()
-        self.face_ref, self.kind, self.index = face_ref, kind, int(index)
+        self.face_ref, self.kind = face_ref, kind
+        if isinstance(index, str):
+            if not index.strip():
+                raise NameError_(f"{kind}() needs a name or a number")
+            self.index = index
+        else:
+            self.index = int(index)
 
     def owner(self):
         return self.face_ref.handle
 
     def sig(self):
-        return f"FP({self.face_ref.sig()},{self.kind},{self.index},{int(self.strict_)},{self._mods_sig()})"
+        return f"FP({self.face_ref.sig()},{self.kind},{self.index!r},{int(self.strict_)},{self._mods_sig()})"
 
     def __repr__(self):
+        if isinstance(self.index, str):
+            return f"{self.face_ref!r}.{self.kind}({_q(self.index)})"
         return f"{self.face_ref!r}.{self.kind}({self.index})"
 
     def _base(self, ctx):
@@ -473,11 +567,26 @@ class FacePointRef(FrameRef):
         face = max(faces, key=lambda f: topo.face_area_centroid(f)[0])
         fr = face_anchor_frame(body, [face], _design_name(body, self.face_ref))
         pts = face_points(body, face, fr)
+        if isinstance(self.index, str):
+            have = pts["named"][self.kind]
+            for nm, p in have:
+                if nm == self.index:
+                    return Frame.make(p, fr.x, fr.z)
+            what = {"corner": "corner", "mid": "edge middle", "arc": "arc centre", "hole": "hole",
+                    "boss": "boss", "inner": "opening corner"}[self.kind]
+            avail = ", ".join(_q(nm) for nm, _ in have) or "none"
+            raise RefError(f"{who}: this face has no {what} named {_q(self.index)} any more (it has: {avail}). "
+                           "The edge or face that made it was changed or removed by an earlier step; "
+                           "pick the point again.")
         lst = pts[self.kind]
         if self.kind in ("corner", "mid", "arc") and not pts["simple"]:
             return _fallback(ctx, self.face_ref, who, "corners, middles and arc centres are on flat faces only", self.strict_)
         if self.index >= len(lst):
             return _fallback(ctx, self.face_ref, who, f"face has only {len(lst)} {self.kind} point(s)", self.strict_)
+        nm = point_name(pts, self.kind, lst[self.index])
+        if nm is not None and isinstance(getattr(ctx, "info", None), dict):
+            # (what this numbered point is called, for the app's "name them" fix)
+            ctx.info.setdefault("point_names", {})[repr(self)] = repr(FacePointRef(self.face_ref, self.kind, nm))
         return Frame.make(lst[self.index], fr.x, fr.z)
 
 

@@ -865,9 +865,10 @@ export class Sketcher {
 
   async sketchEdit(op, args) {
     let out;
+    this.busy = (this.busy || 0) + 1;            // (counted like a solve: tests wait for 0)
     try {
       out = await post("/api/sketch_edit", { op, args, model: this.model, solved: this.solved ? { points: this.solved.points, curves: this.solved.curves } : {} });
-    } catch (e) { toast(e.message, true); return false; }
+    } catch (e) { toast(e.message, true); return false; } finally { this.busy--; }
     this.remember();
     this.model = { points: out.points, curves: out.curves, cons: out.cons };
     this.sel = (out.select || []).filter((k) => k.startsWith("c:"));

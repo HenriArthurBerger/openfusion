@@ -557,3 +557,28 @@ def test_extrude_cut_goes_into_the_part_whichever_way():
     msg = err(src + 's3 = sketch(at=world.anchor("XY").offset(z=50), points={"o": (0, 0)}, curves={"c": ("circle", "o", 2)})\n'
                     'c3 = extrude(s3, 3, op="cut")\n', "c3")
     assert "doesn't reach any body" in msg
+
+
+def test_move_several_bodies_and_copies():
+    import numpy as np
+    r = ok('a = box(length=10, width=10, height=10)\n'
+           'b = cylinder(r=3, h=10, at=world.point(20, 0, 0))\n'
+           'p = pattern_rect(body=b, x=(3, 10), frame="world")\n'
+           'm1 = move(body=[a, b], dx=5, frame="world")\n'
+           'c1 = move(body=a, dz=30, frame="world", copy=True)\n'
+           'c2 = move(body=[a, b], dy=40, frame="world", copy=True)\n'
+           'c3 = move(body=[p], dy=-40, frame="world", copy=True)\n'
+           'c4 = move(body=[a, b], rz=90, frame="world", copy=True)\n'
+           's = sphere(r=1, at=c1.anchor("+Z"))\n'
+           't = sphere(r=1, at=c2[1].anchor("+Z"))\n')
+    lo = lambda n: np.round(topo.bbox(r.bodies[n].shape)[0], 6)                  # noqa: E731
+    assert list(lo("a")) == [5, 0, 0] and list(lo("b")) == [22, -3, 0]          # both moved together
+    assert list(lo("c1")) == [5, 0, 30]                                          # a copy; a stays
+    assert list(lo("c2")) == [5, 40, 0] and list(lo("c2_1")) == [22, 37, 0]     # copies of both, named c2, c2_1
+    assert [list(lo(n)) for n in ("c3", "c3_1", "c3_2")] == [[22, -43, 0], [27, -43, 0], [37, -43, 0]]   # a whole pattern
+    # turned about the first body's origin (a's corner, now at x=5), together
+    assert list(lo("c4")) == [-5, 0, 0] and list(lo("c4_1")) == [2, 17, 0]
+    assert r.bodies["s"].anchor("center").origin == pytest.approx([10, 5, 40])
+    assert r.bodies["t"].anchor("center").origin == pytest.approx([25, 40, 10])
+    assert len([1 for x in r.bodies.values() if x.role == "solid"]) == 14
+    assert "twice" in err('a = box(length=1, width=1, height=1)\nm = move(body=[a, a], dx=1)\n', "m")

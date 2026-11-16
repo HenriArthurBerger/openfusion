@@ -45,6 +45,9 @@ class Session:
         self.last_ms = {}
         self.good = None        # last (desc, scene) that parsed, shown while the script has a syntax error
         self.stale = False
+        self.save_error = None  # why the last change couldn't be written to the file (kept in memory)
+        self.recovery_path = None
+        self.recovery_dir = None  # where an unsaved copy goes (default: the app's support folder)
         self.rebuild()
 
     # ------------------------------------------------------------ building
@@ -97,12 +100,56 @@ class Session:
             self._commit(new_text)
 
     def _commit(self, new_text: str):
-        tmp = self.path + ".tmp"
-        pathlib.Path(tmp).write_text(new_text, encoding="utf-8")
-        os.replace(tmp, self.path)
+        # the change is the model's first: a file that can't be written (a folder macOS hasn't
+        # let the app into, a full disk) must never lose the edit or tear the model down
         self.text = new_text
-        self.mtime = os.stat(self.path).st_mtime_ns
+        self.save()
         self.rebuild()
+
+    def save(self) -> bool:
+        """Write the text to the file: through a temporary file beside it (so a crash can't
+        leave half a file), or, where the folder won't take a new file (macOS lets an app
+        that was handed one file write that file but nothing next to it), into the file
+        itself. If neither works the text stays in memory, a copy goes to the app's support
+        folder, and save_error says what happened; the next change tries again."""
+        with self.lock:
+            text = self.text
+            tmp = self.path + ".tmp"
+            try:
+                try:
+                    pathlib.Path(tmp).write_text(text, encoding="utf-8")
+                    os.replace(tmp, self.path)
+                except OSError:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    with open(self.path, "w", encoding="utf-8") as f:
+                        f.write(text)
+                self.mtime = os.stat(self.path).st_mtime_ns
+                self.save_error = None
+                return True
+            except OSError as e:
+                self.save_error = _save_problem(self.path, e)
+                self.recovery_path = self._keep_copy(text)
+                if self.recovery_path:
+                    self.save_error += f" A copy of your latest version is in {self.recovery_path}."
+                print(f"[{time.strftime('%H:%M:%S')}] could not save {self.path}: {e}", flush=True)
+                return False
+
+    def _keep_copy(self, text: str) -> str | None:
+        try:
+            if self.recovery_dir:
+                folder = pathlib.Path(self.recovery_dir)
+            else:
+                from .workspace import default_support_dir
+                folder = default_support_dir() / "Unsaved"
+            folder.mkdir(parents=True, exist_ok=True)
+            dst = folder / os.path.basename(self.path)
+            dst.write_text(text, encoding="utf-8")
+            return str(dst)
+        except OSError:
+            return None
 
     def undo_step(self):
         with self.lock:
@@ -130,7 +177,7 @@ class Session:
             m = os.stat(self.path).st_mtime_ns
         except FileNotFoundError:
             return False
-        if m == self.mtime:
+        if m == self.mtime or self.save_error:     # (unsaved changes win over the disk)
             return False
         with self.lock:
             self.mtime = m
@@ -405,14 +452,53 @@ class Session:
             except (ValueError, RuntimeError) as e:
                 raise se.EditError(str(e))
 
+    def point_names(self) -> dict:
+        """Step -> {numbered face point it uses: the name of that point} (from the last build)."""
+        out = {}
+        for r in (self.result.results if self.result else []):
+            if r.info and r.info.get("point_names"):
+                out[r.name] = dict(r.info["point_names"])
+        return out
+
+    def numbered_points(self) -> list:
+        return sorted({old for t in self.point_names().values() for old in t})
+
+    def name_points(self) -> dict:
+        with self.lock:
+            text, n = se.name_points(self.text, self.point_names())
+            if n:
+                self.write(text, "name the picked points")
+            return {"changed": n, "state": self.state()}
+
     def state(self) -> dict:
         with self.lock:
             return {"version": self.version, "file": self.path, "text": self.text,
                     "hash": hashlib.sha1(self.text.encode()).hexdigest(),
                     "desc": self.desc, "scene": self.scene, "marker": self.marker, "ms": self.last_ms,
-                    "stale": self.stale, "exprs": self.exprs(),
+                    "stale": self.stale, "exprs": self.exprs(), "save_error": self.save_error,
+                    "numbered_points": self.numbered_points(),
                     "undo": self.undo[-1][1] if self.undo else None,
                     "redo": self.redo[-1][1] if self.redo else None}
+
+
+def _save_problem(path: str, e: OSError) -> str:
+    import errno
+    folder = os.path.dirname(path)
+    home = str(pathlib.Path.home())
+    if folder.startswith(home):
+        folder = "~" + folder[len(home):]
+    name = os.path.basename(path)
+    if e.errno in (errno.EPERM, errno.EACCES):
+        why = (f"macOS didn't let OpenFusion write to {folder}. Allow it in System Settings › "
+               "Privacy & Security › Files and Folders (OpenFusion › Documents Folder), or use "
+               "File › Save a Copy As… to put the part somewhere else.")
+    elif e.errno == errno.ENOSPC:
+        why = "the disk is full."
+    elif e.errno == errno.EROFS:
+        why = f"{folder} is read-only."
+    else:
+        why = f"{e.strerror or e}."
+    return f"Not saved to {name}: {why} Your changes are kept while the app is open."
 
 
 def _statement(text: str, name: str) -> str:
@@ -570,6 +656,8 @@ def route(s: Session, p: str, req: dict):
         if s.marker == req["old"]:
             s.marker = req["new"]
         return {"state": s.state()}
+    if p == "/api/name_points":
+        return s.name_points()
     if p == "/api/fix_names":
         s.write(se.fix_names(s.text), "give reused names their own")
         return {"state": s.state()}

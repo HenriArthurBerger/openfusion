@@ -411,13 +411,15 @@ def body_scene(b) -> dict:
                     entry["snaps"].append(_snap(f"{fref}.anchor()", "center", fr))
                 pts = face_points(b, f, fr)
                 for k in ("hole", "boss", "corner", "mid", "arc", "inner"):
-                    for i, pt in enumerate(pts[k]):
-                        s = _snap(f"{fref}.{k}({i})", k, fr, pt)
+                    # by name, so the reference stays with this point whatever later steps add
+                    # to the face (a number would be its place in the outline, which shifts)
+                    for nm, pt in pts["named"][k]:
+                        s = _snap(f"{fref}.{k}({q(nm)})", k, fr, pt)
                         entry["snaps"].append(s)
                         if k in ("hole", "boss"):
                             holes[tuple(np.round(pt, 5))] = s
                 entry["center"] = _r(fr.origin)
-                entry["points"] = {k: [_r(x) for x in v] for k, v in pts.items() if k != "simple" and v}
+                entry["points"] = {k: [_r(x) for x in v] for k, v in pts.items() if k not in ("simple", "named") and v}
             else:
                 if own and base in anchor_names:
                     entry["snaps"].append(_snap(f"{b.id}.anchor({q(base)})", "center", b.anchor(base)))
